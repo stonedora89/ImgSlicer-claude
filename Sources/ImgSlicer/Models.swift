@@ -50,6 +50,8 @@ enum CropAlgorithmMode: String, CaseIterable, Identifiable, Sendable {
     case filmFrames = "胶片框"
     case visionRectangles = "矩形"
     case foregroundComponents = "主体"
+    case localContrastComponents = "局部对比"
+    case externalDetector = "智能识别"
     case darkGutters = "暗区网格"
 
     var id: String { rawValue }

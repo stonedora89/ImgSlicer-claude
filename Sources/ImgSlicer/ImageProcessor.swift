@@ -82,6 +82,7 @@ struct ImageProcessor: Sendable {
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let analysisCGImage = bitmap.cgImage ?? cgImage
         let baseGray = grayscaleBytes(bitmap: bitmap, width: width, height: height)
         var cachedBaseLuminances: [Double]?
         var bestFallback: [CropRegion] = []
@@ -118,8 +119,11 @@ struct ImageProcessor: Sendable {
                 )
             }
             bestFallback = regions
+            candidates = sampleGuidedCandidates(candidates, sampleProfiles: sampleProfiles)
+            return rankedCandidates(candidates, limit: performance.maxCandidateCount)
         }
 
+        var shouldStopDetection = false
         for preprocessMode in preprocessModes(for: settings) {
             let gray = preprocessedGray(baseGray, mode: preprocessMode, settings: settings)
             var cachedLuminances: [Double]?
@@ -141,9 +145,13 @@ struct ImageProcessor: Sendable {
                 case .filmFrames:
                     regions = detectFilmFrames(luminances: luminances(), width: width, height: height, settings: settings)
                 case .visionRectangles:
-                    regions = detectWithVision(cgImage: cgImage, settings: settings)
+                    regions = detectWithVision(cgImage: analysisCGImage, settings: settings)
                 case .foregroundComponents:
                     regions = detectForegroundComponents(luminances: luminances(), width: width, height: height, settings: settings)
+                case .localContrastComponents:
+                    regions = detectLocalContrastComponents(luminances: luminances(), width: width, height: height, settings: settings)
+                case .externalDetector:
+                    regions = detectWithExternalDetector(imageURL: url, imageWidth: cgImage.width, imageHeight: cgImage.height, settings: settings)
                 case .darkGutters:
                     regions = detectByDarkGutters(luminances: luminances(), width: width, height: height, settings: settings)
                 }
@@ -166,10 +174,13 @@ struct ImageProcessor: Sendable {
                     bestFallback = refinedRegions
                 }
                 if performance.stopAfterFirstMultiRegionCandidate,
-                   settings.algorithmMode != .automatic,
-                   refinedRegions.count > 1 {
+                   shouldStop(after: refinedRegions, settings: settings) {
+                    shouldStopDetection = true
                     break
                 }
+            }
+            if shouldStopDetection {
+                break
             }
         }
 
@@ -187,6 +198,12 @@ struct ImageProcessor: Sendable {
         }
 
         return candidates.isEmpty ? fallbackCandidates(settings: settings) : candidates
+    }
+
+    private func shouldStop(after regions: [CropRegion], settings: CropSettings) -> Bool {
+        guard regions.count > 1 else { return false }
+        guard settings.algorithmMode == .automatic else { return true }
+        return regions.count >= 3 || score(regions: regions) >= 0.56
     }
 
     private func preferredRegions(from candidates: [CropCandidate], settings: CropSettings) -> [CropRegion] {
@@ -600,6 +617,140 @@ struct ImageProcessor: Sendable {
                 ).normalized
                 return CropRegion(index: offset + 1, rect: rect)
             }
+    }
+
+    private func detectLocalContrastComponents(luminances: [Double], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {
+        guard width > 40, height > 40, luminances.count >= width * height else { return [] }
+
+        let analysis = downsampledLuminancesIfNeeded(luminances: luminances, width: width, height: height, maxPixels: 260_000)
+        let workLuminances = analysis.luminances
+        let workWidth = analysis.width
+        let workHeight = analysis.height
+        let background = estimatedBackground(luminances: workLuminances, width: workWidth, height: workHeight)
+        let radius = max(3, min(10, min(workWidth, workHeight) / 70))
+        let localMeans = localMeanLuminances(luminances: workLuminances, width: workWidth, height: workHeight, radius: radius)
+        var scores = [Double](repeating: 0, count: workWidth * workHeight)
+        var sampleScores: [Double] = []
+        sampleScores.reserveCapacity(workWidth * workHeight / 4)
+
+        for y in 1..<(workHeight - 1) {
+            for x in 1..<(workWidth - 1) {
+                let index = y * workWidth + x
+                let value = workLuminances[index]
+                let localContrast = abs(value - localMeans[index])
+                let horizontalEdge = abs(workLuminances[index + 1] - workLuminances[index - 1])
+                let verticalEdge = abs(workLuminances[index + workWidth] - workLuminances[index - workWidth])
+                let gradient = max(horizontalEdge, verticalEdge)
+                let backgroundContrast = abs(value - background)
+                let score = localContrast * 0.78 + gradient * 0.92 + backgroundContrast * 0.14
+                scores[index] = score
+
+                if x % 2 == 0, y % 2 == 0 {
+                    sampleScores.append(score)
+                }
+            }
+        }
+
+        guard !sampleScores.isEmpty else { return [] }
+        let baseThreshold = percentile(sampleScores, fraction: 0.82)
+        let sensitivityAdjustment = (settings.sensitivity - 50) / 900
+        let threshold = max(0.026, min(0.18, baseThreshold - sensitivityAdjustment))
+        let borderInset = max(2, min(workWidth, workHeight) / 180)
+        var mask = [Bool](repeating: false, count: workWidth * workHeight)
+
+        for y in borderInset..<(workHeight - borderInset) {
+            for x in borderInset..<(workWidth - borderInset) {
+                let index = y * workWidth + x
+                guard scores[index] >= threshold else { continue }
+                let value = workLuminances[index]
+                let notFlatBackground = abs(value - background) > 0.035 || scores[index] >= threshold * 1.35
+                mask[index] = notFlatBackground && value > 0.025 && value < 0.995
+            }
+        }
+
+        mask = dilated(mask, width: workWidth, height: workHeight, iterations: 2)
+        var boxes = connectedBoxes(mask: mask, width: workWidth, height: workHeight)
+        boxes = mergeLocalContrastBoxes(boxes, width: workWidth, height: workHeight)
+
+        let minimumAreaRatio = max(0.0007, settings.minimumRegionPercent / 180)
+        let minimumArea = max(70, Int(Double(workWidth * workHeight) * minimumAreaRatio))
+        let maximumWholeScanArea = Double(workWidth * workHeight) * 0.92
+
+        let rects = boxes.compactMap { box -> CGRect? in
+            let area = box.width * box.height
+            guard area >= minimumArea,
+                  Double(area) < maximumWholeScanArea,
+                  box.width > max(16, workWidth / 36),
+                  box.height > max(16, workHeight / 36) else {
+                return nil
+            }
+
+            let density = maskDensity(mask: mask, width: workWidth, box: box)
+            guard density >= 0.018 else { return nil }
+
+            let padX = max(2, min(workWidth / 90, box.width / 14))
+            let padY = max(2, min(workHeight / 90, box.height / 14))
+            let rect = CGRect(
+                x: Double(max(0, box.minX - padX)) / Double(workWidth),
+                y: Double(max(0, box.minY - padY)) / Double(workHeight),
+                width: Double(min(workWidth - 1, box.maxX + padX) - max(0, box.minX - padX) + 1) / Double(workWidth),
+                height: Double(min(workHeight - 1, box.maxY + padY) - max(0, box.minY - padY) + 1) / Double(workHeight)
+            ).normalized
+
+            let refined = refinedByOtsuAndEdges(luminances: workLuminances, width: workWidth, height: workHeight, rect: rect) ?? rect
+            let aspect = refined.width / max(refined.height, 0.001)
+            guard refined.area >= 0.0035,
+                  refined.width > 0.035,
+                  refined.height > 0.035,
+                  aspect >= 0.16,
+                  aspect <= 7.5,
+                  !(refined.width > 0.94 && refined.height > 0.94) else {
+                return nil
+            }
+            return refined
+        }
+
+        let merged = mergeNormalizedRects(rects, overlapThreshold: 0.46)
+        return indexedRegions(from: merged, settings: settings)
+    }
+
+    private func detectWithExternalDetector(imageURL: URL, imageWidth: Int, imageHeight: Int, settings: CropSettings) -> [CropRegion] {
+        guard imageWidth > 0, imageHeight > 0 else { return [] }
+        let detector = ExternalDetector()
+        let result = detector.detect(imageURL: imageURL)
+
+        guard case .success(let detection) = result else {
+            return []
+        }
+
+        let rects = detection.boxes.compactMap { box -> CGRect? in
+            let confidence = box.confidence ?? 0.5
+            guard confidence >= 0.12 else { return nil }
+
+            let left = max(0, min(Double(imageWidth), box.left))
+            let top = max(0, min(Double(imageHeight), box.top))
+            let right = max(left, min(Double(imageWidth), box.right))
+            let bottom = max(top, min(Double(imageHeight), box.bottom))
+            guard right - left > Double(imageWidth) * 0.025,
+                  bottom - top > Double(imageHeight) * 0.025 else {
+                return nil
+            }
+
+            let rect = CGRect(
+                x: left / Double(imageWidth),
+                y: top / Double(imageHeight),
+                width: (right - left) / Double(imageWidth),
+                height: (bottom - top) / Double(imageHeight)
+            ).normalized
+            guard rect.area >= 0.0035,
+                  !(rect.width > 0.94 && rect.height > 0.94) else {
+                return nil
+            }
+            return rect
+        }
+
+        let merged = mergeNormalizedRects(rects, overlapThreshold: 0.42)
+        return indexedRegions(from: merged, settings: settings)
     }
 
     private func writeCrops(photo: PhotoItem, task: FolderTask, regions: [CropRegion]) -> [URL] {
@@ -2620,6 +2771,63 @@ struct ImageProcessor: Sendable {
         return samples[samples.count / 2]
     }
 
+    private func localMeanLuminances(luminances: [Double], width: Int, height: Int, radius: Int) -> [Double] {
+        let stride = width + 1
+        var integral = [Double](repeating: 0, count: (width + 1) * (height + 1))
+        for y in 0..<height {
+            var rowSum = 0.0
+            for x in 0..<width {
+                rowSum += luminances[y * width + x]
+                integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + rowSum
+            }
+        }
+
+        var means = [Double](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let top = max(0, y - radius)
+            let bottom = min(height - 1, y + radius)
+            for x in 0..<width {
+                let left = max(0, x - radius)
+                let right = min(width - 1, x + radius)
+                let x0 = left
+                let y0 = top
+                let x1 = right + 1
+                let y1 = bottom + 1
+                let sum = integral[y1 * stride + x1] - integral[y0 * stride + x1] - integral[y1 * stride + x0] + integral[y0 * stride + x0]
+                means[y * width + x] = sum / Double((right - left + 1) * (bottom - top + 1))
+            }
+        }
+        return means
+    }
+
+    private func downsampledLuminancesIfNeeded(luminances: [Double], width: Int, height: Int, maxPixels: Int) -> (luminances: [Double], width: Int, height: Int) {
+        let pixelCount = width * height
+        guard pixelCount > maxPixels else {
+            return (luminances, width, height)
+        }
+
+        let scale = sqrt(Double(maxPixels) / Double(pixelCount))
+        let targetWidth = max(32, Int(Double(width) * scale))
+        let targetHeight = max(32, Int(Double(height) * scale))
+        var resized = [Double](repeating: 0, count: targetWidth * targetHeight)
+
+        for y in 0..<targetHeight {
+            let sourceY = min(height - 1, Int(Double(y) / Double(targetHeight) * Double(height)))
+            for x in 0..<targetWidth {
+                let sourceX = min(width - 1, Int(Double(x) / Double(targetWidth) * Double(width)))
+                resized[y * targetWidth + x] = luminances[sourceY * width + sourceX]
+            }
+        }
+        return (resized, targetWidth, targetHeight)
+    }
+
+    private func percentile(_ values: [Double], fraction: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let index = min(sorted.count - 1, max(0, Int(Double(sorted.count - 1) * fraction)))
+        return sorted[index]
+    }
+
     private func dilated(_ mask: [Bool], width: Int, height: Int, iterations: Int) -> [Bool] {
         var current = mask
         for _ in 0..<iterations {
@@ -2670,6 +2878,43 @@ struct ImageProcessor: Sendable {
             }
         }
         return boxes
+    }
+
+    private func maskDensity(mask: [Bool], width: Int, box: PixelBox) -> Double {
+        var count = 0
+        for y in box.minY...box.maxY {
+            for x in box.minX...box.maxX where mask[y * width + x] {
+                count += 1
+            }
+        }
+        return Double(count) / Double(max(1, box.width * box.height))
+    }
+
+    private func mergeLocalContrastBoxes(_ boxes: [PixelBox], width: Int, height: Int) -> [PixelBox] {
+        let gap = max(4, min(width, height) / 85)
+        var merged: [PixelBox] = []
+        for box in boxes {
+            var current = box
+            var didMerge = true
+            while didMerge {
+                didMerge = false
+                for index in merged.indices where merged[index].isClose(to: current, gap: gap) {
+                    let union = merged[index].merged(with: current)
+                    let addedArea = union.width * union.height - merged[index].width * merged[index].height - current.width * current.height
+                    let reasonableBridge = addedArea < max(120, min(width, height) * min(width, height) / 90)
+                    let similarRow = abs(merged[index].minY - current.minY) < max(18, height / 18)
+                        || abs(merged[index].maxY - current.maxY) < max(18, height / 18)
+                    if reasonableBridge || similarRow {
+                        current = union
+                        merged.remove(at: index)
+                        didMerge = true
+                        break
+                    }
+                }
+            }
+            merged.append(current)
+        }
+        return merged
     }
 
     private func mergeCloseBoxes(_ boxes: [PixelBox], width: Int, height: Int) -> [PixelBox] {

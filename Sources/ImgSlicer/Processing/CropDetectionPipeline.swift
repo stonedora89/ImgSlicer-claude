@@ -5,6 +5,8 @@ enum CropDetectionStage: Sendable {
     case filmFrames
     case visionRectangles
     case foregroundComponents
+    case localContrastComponents
+    case externalDetector
     case darkGutters
 
     var displayName: String {
@@ -17,6 +19,10 @@ enum CropDetectionStage: Sendable {
             return "矩形轮廓"
         case .foregroundComponents:
             return "主体区域"
+        case .localContrastComponents:
+            return "局部对比"
+        case .externalDetector:
+            return "智能识别"
         case .darkGutters:
             return "暗区网格"
         }
@@ -46,15 +52,18 @@ struct CropDetectionPipeline: Sendable {
         let automaticStages: [CropDetectionStage]
         switch settings.businessProfile {
         case .filmScan:
-            automaticStages = [.projectionSeparators, .filmFrames, .visionRectangles, .foregroundComponents]
+            automaticStages = [.projectionSeparators, .filmFrames, .localContrastComponents, .visionRectangles, .foregroundComponents]
         case .gridPhoto:
-            automaticStages = [.projectionSeparators, .foregroundComponents, .visionRectangles, .filmFrames]
+            automaticStages = [.projectionSeparators, .localContrastComponents, .foregroundComponents, .visionRectangles, .filmFrames]
         case .balanced:
-            automaticStages = [.filmFrames, .projectionSeparators, .visionRectangles, .foregroundComponents]
+            automaticStages = [.filmFrames, .projectionSeparators, .localContrastComponents, .visionRectangles, .foregroundComponents]
         }
 
         guard let selectedStage = settings.algorithmMode.stage else {
             return automaticStages
+        }
+        if selectedStage == .externalDetector {
+            return [selectedStage]
         }
         return [selectedStage] + automaticStages.filter { $0 != selectedStage }
     }
@@ -73,6 +82,10 @@ private extension CropAlgorithmMode {
             return .visionRectangles
         case .foregroundComponents:
             return .foregroundComponents
+        case .localContrastComponents:
+            return .localContrastComponents
+        case .externalDetector:
+            return .externalDetector
         case .darkGutters:
             return .darkGutters
         }

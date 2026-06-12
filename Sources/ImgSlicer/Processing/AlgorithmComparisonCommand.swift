@@ -157,7 +157,7 @@ struct AlgorithmComparisonCommand: Sendable {
         let results = images.map { imageURL in
             compare(imageURL: imageURL, processor: processor, pythonRunner: pythonRunner)
         }
-        let report = renderReport(results: results, pythonPath: pythonRunner.pythonPath)
+        let report = renderReport(results: results, pythonPath: pythonRunner.pythonPath, detectorPath: pythonRunner.scriptPath)
 
         if let outputURL {
             do {
@@ -178,7 +178,8 @@ struct AlgorithmComparisonCommand: Sendable {
         let swiftRegions = processor.detectCropRegions(for: imageURL, settings: settings)
         let swiftDuration = Date().timeIntervalSince(swiftStart)
 
-        let imageSize = NSImage(contentsOf: imageURL)?.size ?? .zero
+        let cgImage = NSImage(contentsOf: imageURL)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let imageSize = cgImage.map { CGSize(width: $0.width, height: $0.height) } ?? .zero
         let swiftBoxes = swiftRegions.map { region in
             PixelRect(
                 left: region.rect.minX * imageSize.width,
@@ -219,7 +220,7 @@ struct AlgorithmComparisonCommand: Sendable {
         }
     }
 
-    private func renderReport(results: [AlgorithmComparisonResult], pythonPath: String) -> String {
+    private func renderReport(results: [AlgorithmComparisonResult], pythonPath: String, detectorPath: String) -> String {
         let comparable = results.filter { $0.pythonError == nil }
         let averageIoU = comparable.flatMap(\.matchMetrics).map(\.iou).average
         let exactCountMatches = comparable.filter { $0.swiftBoxes.count == $0.pythonBoxes.count }.count
@@ -233,7 +234,9 @@ struct AlgorithmComparisonCommand: Sendable {
         lines.append("- Business profile: `\(settings.businessProfile.rawValue)`")
         lines.append("- Images: \(results.count)")
         lines.append("- Python runner: `\(pythonPath)`")
+        lines.append("- External detector: `\(detectorPath)`")
         lines.append("- Python override: set `IMGSLICER_PYTHON=/path/to/python` when running the command")
+        lines.append("- Detector override: set `IMGSLICER_DETECTOR_SCRIPT=/path/to/opencv_detector.py` when running the command")
         lines.append("- Count match: \(exactCountMatches) / \(comparable.count)")
         lines.append("- Average matched IoU: \(String(format: "%.3f", averageIoU))")
         lines.append("- Swift total: \(String(format: "%.2fs", totalSwiftTime))")
@@ -264,7 +267,7 @@ struct AlgorithmComparisonCommand: Sendable {
             lines.append("")
             lines.append("### \(result.imageURL.lastPathComponent)")
             if let pythonError = result.pythonError {
-                lines.append("Python error: `\(pythonError)`")
+                lines.append("External detector error: `\(pythonError)`")
             }
             lines.append("- Swift: \(result.swiftBoxes.map(\.description).joined(separator: ", "))")
             lines.append("- Python: \(result.pythonBoxes.map(\.description).joined(separator: ", "))")
@@ -314,7 +317,7 @@ struct AlgorithmComparisonCommand: Sendable {
     private static func projectRoot() -> URL {
         var url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
         while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("app.py").path) {
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
                 return url
             }
             url.deleteLastPathComponent()
@@ -344,62 +347,25 @@ private func applyCLISettings(arguments: [String], settings: inout CropSettings)
 }
 
 private struct PythonReferenceDetector {
-    let projectRoot: URL
     let pythonPath: String
+    let scriptPath: String
 
     init(projectRoot: URL) {
-        self.projectRoot = projectRoot
-        self.pythonPath = Self.resolvePython(projectRoot: projectRoot)
+        let detector = ExternalDetector(projectRoot: projectRoot)
+        self.pythonPath = detector.pythonPath
+        self.scriptPath = detector.scriptURL?.path ?? "not found"
     }
 
     func detect(imageURL: URL) -> PythonDetectionOutcome {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: pythonPath)
-        process.currentDirectoryURL = projectRoot
-        process.arguments = ["app.py", "--detect-json", imageURL.path]
-
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return .failure(error.localizedDescription)
+        switch ExternalDetector().detect(imageURL: imageURL) {
+        case .success(let result):
+            let boxes = result.boxes.map { box in
+                PixelRect(left: box.left, top: box.top, right: box.right, bottom: box.bottom)
+            }
+            return .success(PythonDetectionResult(boxes: boxes))
+        case .failure(let error):
+            return .failure(error)
         }
-
-        let outputData = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = error.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            return .failure(stderr.isEmpty ? "python exited with \(process.terminationStatus)" : stderr)
-        }
-
-        do {
-            return .success(try JSONDecoder().decode(PythonDetectionResult.self, from: outputData))
-        } catch {
-            let raw = String(data: outputData, encoding: .utf8) ?? ""
-            return .failure("decode failed: \(error.localizedDescription); output: \(raw)")
-        }
-    }
-
-    private static func resolvePython(projectRoot: URL) -> String {
-        if let override = ProcessInfo.processInfo.environment["IMGSLICER_PYTHON"],
-           FileManager.default.isExecutableFile(atPath: override) {
-            return override
-        }
-
-        let candidates = [
-            projectRoot.appendingPathComponent(".venv/bin/python3").path,
-            projectRoot.appendingPathComponent("venv/bin/python3").path,
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/bin/python3"
     }
 }
 
@@ -487,6 +453,10 @@ private extension CropAlgorithmMode {
             self = .visionRectangles
         case "foregroundComponents", "foreground", "components":
             self = .foregroundComponents
+        case "localContrastComponents", "localContrast", "contrastComponents", "local":
+            self = .localContrastComponents
+        case "externalDetector", "external", "opencv", "python", "smart":
+            self = .externalDetector
         case "darkGutters", "dark", "gutters":
             self = .darkGutters
         default:

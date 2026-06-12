@@ -30,6 +30,7 @@ imgs/
 
 # Product notes, mockups, and local experiments
 algorithm-comparison.md
+algorithm-comparison-*.md
 imgslicer-v33-requirements.md
 mockup-v33.html
 app.py
