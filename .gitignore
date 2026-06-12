@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+__MACOSX/
+
+# Swift Package Manager / Xcode build output
+.build/
+.swiftpm/
+DerivedData/
+
+# Python local environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Packaged builds and local release artifacts
+dist/
+*.app/
+*.dmg
+*.pkg
+*.zip
+
+# Generated/debug output
+debug-overlays/
+*_ImgSlicer_Output/
+ImgSlicer_Output/
+
+# Local/user-provided photo folders
+imgs/
+
+# Local processing state generated beside imported images
+*.imgslicer-edits.json
+*.imgslicer-samples.json

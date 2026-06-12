@@ -1,0 +1,326 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ImgSlicer V33</title>
+  <style>
+    :root {
+      --line: rgba(255,255,255,.08);
+      --line-soft: rgba(255,255,255,.05);
+      --text: #eef2f7;
+      --muted: #97a0b0;
+      --blue: #5f87b8;
+      --blue-soft: rgba(95,135,184,.16);
+      --green: #4fa78b;
+      --shadow: 0 24px 68px rgba(0,0,0,.42);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: auto;
+      font-family: Inter, "SF Pro Display", "PingFang SC", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top, #20242b 0%, #16191e 45%, #0e1013 100%);
+    }
+    .window {
+      width: 1560px;
+      height: 980px;
+      margin: 12px auto;
+      border-radius: 24px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #181b20, #111317);
+      border: 1px solid rgba(255,255,255,.05);
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-rows: 72px 1fr 132px;
+    }
+    .topbar { display:flex; align-items:center; gap:18px; padding:0 20px; background:rgba(24,27,32,.96); border-bottom:1px solid var(--line); }
+    .traffic { display:flex; gap:8px; }
+    .traffic span { width:12px; height:12px; border-radius:50%; display:block; }
+    .r{background:#ff5f57}.y{background:#febc2e}.g{background:#28c840}
+    .brand { display:flex; align-items:center; gap:12px; min-width:220px; }
+    .logo { width:34px; height:34px; object-fit:contain; display:block; }
+
+    .brand h1 { margin:0; font-size:16px; }
+    .brand p { margin:2px 0 0; font-size:12px; color:var(--muted); }
+
+    .main { display:grid; grid-template-columns:340px 1fr 320px; gap:16px; padding:16px; min-height:0; }
+    .panel { border-radius:20px; overflow:hidden; border:1px solid rgba(255,255,255,.05); background:linear-gradient(180deg, #1a1d23, #14171c); display:flex; flex-direction:column; min-width:0; }
+    .left-head { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .left-head strong { font-size:13px; }
+    .btn-row { display:flex; gap:10px; }
+    .btn { height:40px; padding:0 16px; border-radius:12px; border:1px solid rgba(255,255,255,.07); background:#23272f; color:var(--text); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; }
+    .btn.primary { background:linear-gradient(135deg, #48678d, #3d597e); }
+    .btn.warn { color:#8f99a8; border-color:rgba(255,255,255,.05); background:rgba(255,255,255,.02); }
+    .btn.tiny { height:28px; padding:0 10px; border-radius:9px; font-size:11px; font-weight:600; }
+    .icon-btn { width:30px; height:30px; padding:0; border-radius:9px; }
+    .icon-btn svg { width:15px; height:15px; opacity:.82; overflow:visible; transform:translateY(1px); }
+    .icon-btn:hover { background:rgba(255,255,255,.04); }
+    .icon-btn:hover svg { opacity:.9; }
+
+    .folder-list { padding:12px; display:grid; gap:10px; overflow-y:auto; overflow-x:hidden; min-height:0; scrollbar-width:thin; }
+    .folder-list::-webkit-scrollbar { width:8px; }
+    .folder-list::-webkit-scrollbar-thumb { background:rgba(255,255,255,.12); border-radius:999px; }
+    .folder-item { padding:11px 12px; border-radius:14px; background:#1d2127; border:1px solid rgba(255,255,255,.05); }
+    .folder-item.active { border-color:rgba(95,135,184,.16); box-shadow: inset 0 0 0 1px rgba(95,135,184,.08); background:#20252d; }
+    .folder-top { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+    .folder-left { display:flex; gap:10px; align-items:center; min-width:0; }
+    .check { width:18px; height:18px; border-radius:6px; border:1px solid rgba(255,255,255,.14); background:#171a20; display:flex; align-items:center; justify-content:center; font-size:12px; }
+    .checked { background:rgba(79,167,139,.18); border-color:rgba(79,167,139,.24); }
+    .folder-name { font-size:13px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:190px; }
+    .folder-meta { margin-top:6px; color:var(--muted); font-size:11px; line-height:1.2; }
+    .status { padding:0; font-size:11px; background:transparent; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+    .st-run { color:#b8c9da; }
+    .st-wait { color:#d5b07f; }
+    .st-done { color:#9ac9bb; }
+    .st-queue { color:#bcc4cf; }
+    .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; background:currentColor; opacity:.95; }
+    .pbar { margin-top:9px; height:4px; border-radius:999px; background:rgba(255,255,255,.05); overflow:hidden; }
+    .pbar span { display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #5f87b8, #7aa2cb); }
+
+    .viewer {
+      position:relative;
+      border-radius:22px;
+      overflow:hidden;
+      border:1px solid rgba(255,255,255,.05);
+      background:radial-gradient(circle at top, #1a1e25 0%, #13161b 55%, #0d0f13 100%);
+    }
+    .viewer-top { position:absolute; top:0; left:0; right:0; padding:16px 18px; display:flex; justify-content:space-between; align-items:flex-start; z-index:3; }
+    .info { display:grid; gap:4px; }
+    .t1 { font-size:14px; font-weight:700; }
+    .capsule { padding:8px 12px; border-radius:999px; background:rgba(16,18,22,.76); border:1px solid rgba(255,255,255,.07); font-size:11px; color:#cad4df; backdrop-filter: blur(10px); }
+    .canvas { position:absolute; inset:0; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 40px 40px; opacity:.45; }
+    .photo { position:absolute; left:120px; top:92px; width:620px; height:470px; border-radius:26px; background:linear-gradient(135deg, rgba(57,43,31,.90), rgba(35,26,19,.95)), radial-gradient(circle at 25% 30%, rgba(255,239,201,.14), transparent 24%), radial-gradient(circle at 72% 38%, rgba(255,218,166,.10), transparent 28%), linear-gradient(90deg, rgba(84,63,43,.24), rgba(43,31,21,.12) 26%, rgba(78,58,39,.18) 52%, rgba(28,21,15,.12) 76%, rgba(76,58,40,.20)); box-shadow: 0 22px 46px rgba(0,0,0,.36); filter:brightness(.78) saturate(.70); }
+    .detect { position:absolute; left:160px; top:126px; width:540px; height:400px; border:2px solid rgba(122,162,203,.62); border-radius:18px; box-shadow:0 0 0 1px rgba(122,162,203,.10), 0 0 0 999px rgba(0,0,0,.18) inset; }
+    .handle { position:absolute; width:14px; height:14px; border-radius:50%; background:#dce9f5; border:2px solid #5f87b8; box-shadow:0 4px 10px rgba(0,0,0,.28); }
+    .h1 { left:153px; top:119px; } .h2 { right:178px; top:119px; } .h3 { left:153px; top:519px; } .h4 { right:178px; top:519px; }
+
+    .viewer-log {
+      position:absolute;
+      left:16px;
+      right:16px;
+      bottom:16px;
+      z-index:3;
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap:12px;
+      pointer-events:none;
+    }
+    .log-card {
+      max-width:420px;
+      padding:12px 14px;
+      border-radius:16px;
+      background:rgba(15,17,21,.82);
+      border:1px solid rgba(255,255,255,.06);
+      box-shadow:0 14px 40px rgba(0,0,0,.24);
+      backdrop-filter: blur(14px);
+    }
+    .log-topline { display:flex; align-items:center; gap:8px; font-size:11px; color:#c9d4df; margin-bottom:6px; }
+    .log-led { width:6px; height:6px; border-radius:50%; background:var(--green); opacity:.85; }
+    .log-main { font-size:12px; line-height:1.5; color:#e9eef4; }
+    .log-sub { margin-top:4px; font-size:11px; color:var(--muted); }
+    .log-stack { display:grid; gap:8px; width:260px; }
+    .log-mini {
+      padding:9px 11px;
+      border-radius:14px;
+      background:rgba(15,17,21,.68);
+      border:1px solid rgba(255,255,255,.05);
+      font-size:11px;
+      color:#aeb8c5;
+      backdrop-filter: blur(10px);
+    }
+    .log-mini strong { color:var(--text); font-size:11px; }
+
+    .right-panel { display:flex; flex-direction:column; min-height:0; background:linear-gradient(180deg, #1b1f26, #15181d); }
+    .right-panel-top { padding:14px 16px 12px; border-bottom:1px solid var(--line); display:grid; gap:12px; }
+    .action-panel { display:grid; gap:10px; }
+    .action-buttons { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .action-buttons .btn {
+      height:36px;
+      padding:0 12px;
+      border:1px solid rgba(255,255,255,.07);
+      background:#23272f;
+      border-radius:10px;
+      justify-content:center;
+      color:#cbd5e1;
+      font-size:13px;
+      font-weight:650;
+    }
+    .action-buttons .btn.primary {
+      background:linear-gradient(135deg, #48678d, #3d597e);
+      color:#eef2f7;
+    }
+    .action-buttons .btn:hover { filter:brightness(1.04); }
+    .right-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .right-head strong { font-size:15px; letter-spacing:.2px; }
+    .form { padding:18px 14px 14px; display:grid; gap:12px; overflow:auto; }
+    .group { display:grid; gap:10px; padding:14px; border-radius:16px; background:rgba(255,255,255,.025); border:1px solid var(--line-soft); }
+    .group h3 { margin:0; font-size:12px; color:#dbe3ed; }
+    .scope, .seg { display:flex; gap:8px; flex-wrap:wrap; }
+    .chip { min-height:36px; padding:0 12px; border-radius:11px; background:#1f2329; border:1px solid rgba(255,255,255,.06); font-size:12px; color:#c3ceda; display:flex; align-items:center; justify-content:center; }
+    .chip.active { background:var(--blue-soft); border-color:rgba(95,135,184,.24); color:#dbe6f2; box-shadow: inset 0 0 0 1px rgba(95,135,184,.10); }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .field { padding:10px; border-radius:12px; background:rgba(0,0,0,.12); border:1px solid rgba(255,255,255,.04); }
+    .label { font-size:11px; color:var(--muted); margin-bottom:6px; }
+    .input { height:38px; border-radius:10px; background:#1c2026; border:1px solid rgba(255,255,255,.06); padding:0 12px; display:flex; align-items:center; color:#dbe3ed; font-size:12px; }
+    .slider-wrap { display:grid; gap:8px; }
+    .slider { height:8px; border-radius:999px; background:linear-gradient(90deg, #5f87b8 0 64%, rgba(255,255,255,.06) 64%); }
+
+    .filmstrip { border-top:1px solid var(--line); background:linear-gradient(180deg, rgba(20,23,28,.98), rgba(15,17,21,.98)); padding:10px 16px 12px; display:grid; grid-template-rows:auto 1fr; gap:10px; }
+    .film-top { display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .film-top strong { font-size:13px; }
+    .film-summary { display:flex; align-items:center; gap:6px; padding:0; background:transparent; border:none; color:#8792a1; font-size:11px; white-space:nowrap; }
+    .film-row { display:flex; align-items:center; gap:10px; min-height:0; }
+    .nav { width:30px; height:78px; border-radius:11px; background:#1b1f25; border:1px solid rgba(255,255,255,.05); color:var(--muted); display:flex; align-items:center; justify-content:center; font-size:18px; flex:0 0 auto; }
+    .frames { flex:1; display:flex; gap:10px; overflow:hidden; min-width:0; }
+    .frame { min-width:124px; height:78px; padding:6px; border-radius:12px; background:#1d2128; border:1px solid rgba(255,255,255,.05); position:relative; }
+    .frame.active { border-color:rgba(95,135,184,.22); box-shadow: inset 0 0 0 1px rgba(95,135,184,.10); }
+    .dot { position:absolute; top:8px; right:8px; width:8px; height:8px; border-radius:50%; }
+    .done { background:#71c0a7; } .warn { background:#dfb16e; } .idle { background:#667081; }
+    .frame .img { height:44px; border-radius:8px; background:linear-gradient(135deg, rgba(160,132,98,.10), rgba(90,70,52,.04)), repeating-linear-gradient(90deg, #4a3726 0 10px, #71563b 10px 20px, #3b2a1c 20px 30px); filter:brightness(.82) saturate(.74); }
+    .frame .name { margin-top:7px; font-size:10px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .frame .meta { margin-top:2px; font-size:10px; color:#7f8897; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="topbar">
+      <div class="traffic"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+      <div class="brand">
+        <img class="logo" src="./renderer/assets/icon.svg" alt="ImgSlicer logo" />
+        <div>
+          <h1>ImgSlicer</h1>
+          <p>批量底片切分与边界微调</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="main">
+      <div class="panel">
+        <div class="left-head">
+          <strong>任务列表</strong>
+          <div class="btn-row">
+            <div class="btn tiny warn icon-btn" title="清理已完成与未开始任务" aria-label="清理"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9.4 6.7L14.7 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8.4 6.9L10.9 4.4C11.2 4.1 11.6 4.1 11.9 4.4L16.3 8.8C16.6 9.1 16.6 9.5 16.3 9.8L13.8 12.3" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12.9 12.9L8 17.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6.5 17.2H11.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5.5 19.4H10.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".85"/><path d="M4.6 21.2H9.6" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".65"/></svg></div>
+          </div>
+        </div>
+        <div class="folder-list">
+          <div class="folder-item active"><div class="folder-top"><div class="folder-left"><div class="check checked">✓</div><div><div class="folder-name">2026-06-底片批次-A</div><div class="folder-meta">92 张图片 · 当前正在人工微调第 3 张<br>已处理 42 / 92</div></div></div><div class="status st-wait"><span class="sdot"></span>需确认</div></div><div class="pbar"><span style="width:46%"></span></div></div>
+          <div class="folder-item"><div class="folder-top"><div class="folder-left"><div class="check checked">✓</div><div><div class="folder-name">证件照补扫_B</div><div class="folder-meta">64 张图片 · 后台继续自动裁切<br>已处理 33 / 64</div></div></div><div class="status st-run"><span class="sdot"></span>处理中</div></div><div class="pbar"><span style="width:51%"></span></div></div>
+          <div class="folder-item"><div class="folder-top"><div class="folder-left"><div class="check checked">✓</div><div><div class="folder-name">旧底片_2025_冬</div><div class="folder-meta">58 张图片 · 第 2 个并发任务<br>已处理 11 / 58</div></div></div><div class="status st-run"><span class="sdot"></span>处理中</div></div><div class="pbar"><span style="width:18%"></span></div></div>
+          <div class="folder-item"><div class="folder-top"><div class="folder-left"><div class="check checked">✓</div><div><div class="folder-name">黑白胶卷备份</div><div class="folder-meta">41 张图片 · 第 3 个并发任务<br>已处理 3 / 41</div></div></div><div class="status st-run"><span class="sdot"></span>处理中</div></div><div class="pbar"><span style="width:9%"></span></div></div>
+          <div class="folder-item"><div class="folder-top"><div class="folder-left"><div class="check checked">✓</div><div><div class="folder-name">扫描返修_第二批</div><div class="folder-meta">31 张图片 · 等待空闲处理槽位<br>已处理 0 / 31</div></div></div><div class="status st-queue"><span class="sdot"></span>等待中</div></div><div class="pbar"><span style="width:0%"></span></div></div>
+          <div class="folder-item"><div class="folder-top"><div class="folder-left"><div class="check"></div><div><div class="folder-name">客片_婚礼卷_01</div><div class="folder-meta">18 张图片 · 已输出完成<br>已处理 18 / 18</div></div></div><div class="status st-done"><span class="sdot"></span>已完成</div></div><div class="pbar"><span style="width:100%"></span></div></div>
+        </div>
+      </div>
+
+      <div class="viewer">
+        <div class="viewer-top">
+          <div class="info">
+            <div class="t1">当前图片：scan_003.jpg</div>
+          </div>
+          <div class="capsule">当前文件夹：2026-06-底片批次-A</div>
+        </div>
+        <div class="canvas"></div>
+        <div class="photo"></div>
+        <div class="detect"></div>
+        <div class="handle h1"></div>
+        <div class="handle h2"></div>
+        <div class="handle h3"></div>
+        <div class="handle h4"></div>
+        <div class="viewer-log">
+          <div class="log-card">
+            <div class="log-topline"><span class="log-led"></span><span>当前操作反馈</span></div>
+            <div class="log-main">已更新自动识别框，保留右边距微调结果。</div>
+            <div class="log-sub">12:48 · scan_003.jpg · 手动拖拽后重新计算</div>
+          </div>
+          <div class="log-stack">
+            <div class="log-mini"><strong>上一条</strong><br>scan_002.jpg 已保存</div>
+            <div class="log-mini"><strong>队列</strong><br>后台仍在处理 2 个文件夹</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel right-panel">
+        <div class="right-panel-top">
+          <div class="action-panel">
+            <div class="action-buttons">
+              <div class="btn">导入文件</div>
+              <div class="btn primary">开始</div>
+            </div>
+          </div>
+          <div class="right-head">
+            <strong>参数设置</strong>
+          </div>
+        </div>
+        <div class="form">
+          <div class="group">
+            <h3>应用范围</h3>
+            <div class="scope">
+              <div class="chip active">当前</div>
+              <div class="chip">整个文件夹</div>
+            </div>
+          </div>
+          <div class="group">
+            <h3>图片方向</h3>
+            <div class="seg">
+              <div class="chip active">自动</div>
+              <div class="chip">横向</div>
+              <div class="chip">纵向</div>
+            </div>
+          </div>
+          <div class="group">
+            <h3>边距设置</h3>
+            <div class="grid2">
+              <div class="field"><div class="label">上边距</div><div class="input">12 px</div></div>
+              <div class="field"><div class="label">下边距</div><div class="input">14 px</div></div>
+              <div class="field"><div class="label">左边距</div><div class="input">18 px</div></div>
+              <div class="field"><div class="label">右边距</div><div class="input">18 px</div></div>
+            </div>
+          </div>
+          <div class="group">
+            <h3>边缘识别灵敏度</h3>
+            <div class="slider-wrap">
+              <div class="label">当前值 64%</div>
+              <div class="slider"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="filmstrip">
+      <div class="film-top">
+        <strong>图片胶片栏</strong>
+        <div class="film-summary"><span class="log-led"></span><span>3 个运行中 · 1 个等待</span></div>
+      </div>
+      <div class="film-row">
+        <div class="nav">‹</div>
+        <div class="frames">
+          <div class="frame"><div class="dot done"></div><div class="img"></div><div class="name">scan_001.jpg</div><div class="meta">已完成</div></div>
+          <div class="frame"><div class="dot done"></div><div class="img"></div><div class="name">scan_002.jpg</div><div class="meta">已完成</div></div>
+          <div class="frame active"><div class="dot warn"></div><div class="img"></div><div class="name">scan_003.jpg</div><div class="meta">正在微调</div></div>
+          <div class="frame"><div class="dot idle"></div><div class="img"></div><div class="name">scan_004.jpg</div><div class="meta">待处理</div></div>
+          <div class="frame"><div class="dot idle"></div><div class="img"></div><div class="name">scan_005.jpg</div><div class="meta">待处理</div></div>
+          <div class="frame"><div class="dot idle"></div><div class="img"></div><div class="name">scan_006.jpg</div><div class="meta">待处理</div></div>
+          <div class="frame"><div class="dot idle"></div><div class="img"></div><div class="name">scan_007.jpg</div><div class="meta">待处理</div></div>
+          <div class="frame"><div class="dot idle"></div><div class="img"></div><div class="name">scan_008.jpg</div><div class="meta">待处理</div></div>
+        </div>
+        <div class="nav">›</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
