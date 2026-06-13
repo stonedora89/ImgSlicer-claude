@@ -19,7 +19,6 @@ struct ImgSlicerApp: App {
             command.run()
             Foundation.exit(0)
         }
-        AppIcon.install()
     }
 
     var body: some Scene {
