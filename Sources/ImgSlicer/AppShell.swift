@@ -1018,7 +1018,6 @@ struct LogoMark: View {
         Image(nsImage: AppIcon.image())
             .resizable()
             .scaledToFit()
-            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

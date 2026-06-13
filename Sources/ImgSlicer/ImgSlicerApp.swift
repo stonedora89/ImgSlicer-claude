@@ -58,6 +58,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 enum AppIcon {
     static func image() -> NSImage {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+        if let url = Bundle.main.url(forResource: "icon", withExtension: "svg"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
         if let url = Bundle.module.url(forResource: "icon", withExtension: "svg"),
            let image = NSImage(contentsOf: url) {
             return image
