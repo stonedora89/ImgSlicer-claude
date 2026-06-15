@@ -197,8 +197,8 @@ def detect_structured_layout(gray, scale):
             if len(row_spans) > 2:
                 row_spans = dominant_spans(row_spans, 2)
             if 1 < len(row_spans) <= 4:
-                return boxes_from_grid(row_spans, col_spans, scale=scale)
-            return boxes_from_spans(col_spans, 0, height, axis="x", scale=scale)
+                return boxes_from_grid(gray, row_spans, col_spans, scale=scale)
+            return boxes_from_spans(gray, col_spans, 0, height, axis="x", scale=scale)
 
     if height >= width * 1.8:
         row_spans = split_axis_by_separators(gray, axis="y")
@@ -207,8 +207,8 @@ def detect_structured_layout(gray, scale):
                 row_spans = dominant_spans(row_spans, 3)
             col_spans = split_axis_by_separators(gray, axis="x")
             if 1 < len(col_spans) <= 4:
-                return boxes_from_grid(row_spans, col_spans, scale=scale)
-            return boxes_from_spans(row_spans, 0, width, axis="y", scale=scale)
+                return boxes_from_grid(gray, row_spans, col_spans, scale=scale)
+            return boxes_from_spans(gray, row_spans, 0, width, axis="y", scale=scale)
 
     return []
 
@@ -242,54 +242,103 @@ def detect_contact_sheet(gray, scale):
 
 
 def refine_contact_cell(gray, col_start, col_end, row_start, row_end):
-    """Converge onto the true photo edges inside a contact-sheet slot.
+    """Contact-sheet slot: pad outward to find the sprocket/gutter bands."""
+    return refine_slot(
+        gray, col_start, col_end, row_start, row_end,
+        pad_x_frac=1.0 / 6.0, pad_y_frac=1.0 / 3.0,
+    )
 
-    The slot from the equal-width column division and the row band is generous:
-    it includes the thin black frame separators on the left/right and the dark
-    sprocket / inter-strip gutter above and below. Instead of chopping a fixed
-    1/6 off every side (which cut into the photo), we locate the dark gutters
-    that bound the photo and snap just inside them.
+
+def refine_slot(gray, x0, x1, y0, y1, pad_x_frac=0.0, pad_y_frac=0.0):
+    """Converge a candidate slot onto the true photo edges.
+
+    A slot produced by equal division or separator spans is generous: it
+    includes blank scanner bed, inter-frame gutters and thin black borders.
+    Rather than trusting those boundaries, we locate the contiguous run of
+    actual image content (the "body") on each axis and snap just inside it.
+
+    `pad_*_frac` optionally widens the search window past the slot so an edge
+    that sits a little outside the slot (e.g. the sprocket band on a contact
+    sheet) can still be found; with the default 0 the slot is only trimmed
+    inward, which tightens loose grid/strip boxes onto the photo.
     """
     height, width = gray.shape[:2]
-    col_start = max(0, min(width - 1, col_start))
-    col_end = max(col_start + 1, min(width, col_end))
-    row_start = max(0, min(height - 1, row_start))
-    row_end = max(row_start + 1, min(height, row_end))
+    x0 = max(0, min(width - 1, int(round(x0))))
+    x1 = max(x0 + 1, min(width, int(round(x1))))
+    y0 = max(0, min(height - 1, int(round(y0))))
+    y1 = max(y0 + 1, min(height, int(round(y1))))
 
     def is_body(section):
         return ((section > 45) & (section < 250)).astype(float)
 
-    # --- Vertical edges: search a window padded past the row band so we can see
-    # the dark gutters above and below, then keep the high-content band that
-    # contains the slot centre.
-    pad_y = max(4, (row_end - row_start) // 3)
-    y0 = max(0, row_start - pad_y)
-    y1 = min(height, row_end + pad_y)
-    centre_y = (row_start + row_end) // 2
-    col = gray[y0:y1, col_start:col_end]
-    top, bottom = _content_band(is_body(col).mean(axis=1), centre_y - y0, y0)
+    # --- Vertical edges ---
+    pad_y = max(0, int((y1 - y0) * pad_y_frac))
+    sy0 = max(0, y0 - pad_y)
+    sy1 = min(height, y1 + pad_y)
+    centre_y = (y0 + y1) // 2
+    col = gray[sy0:sy1, x0:x1]
+    top, bottom = _content_band(is_body(col).mean(axis=1), centre_y - sy0, sy0)
     if top is None:
-        top, bottom = row_start, row_end
+        top, bottom = y0, y1
 
-    # --- Horizontal edges: within the refined vertical extent, trim the black
-    # frame separators on the left/right of the slot.
-    pad_x = max(2, (col_end - col_start) // 6)
-    x0 = max(0, col_start - pad_x)
-    x1 = min(width, col_end + pad_x)
-    centre_x = (col_start + col_end) // 2
-    rowsec = gray[max(0, top):max(top + 1, bottom), x0:x1]
-    left, right = _content_band(is_body(rowsec).mean(axis=0), centre_x - x0, x0)
+    # --- Horizontal edges (within the refined vertical extent) ---
+    pad_x = max(0, int((x1 - x0) * pad_x_frac))
+    sx0 = max(0, x0 - pad_x)
+    sx1 = min(width, x1 + pad_x)
+    centre_x = (x0 + x1) // 2
+    rowsec = gray[max(0, top):max(top + 1, bottom), sx0:sx1]
+    left, right = _content_band(is_body(rowsec).mean(axis=0), centre_x - sx0, sx0)
     if left is None:
-        left, right = col_start, col_end
+        left, right = x0, x1
+
+    # Snap each edge to the strongest local luminance transition (the actual
+    # photo border against the gutter/scanner bed) so the box sits exactly on
+    # the edge instead of where the content ratio happened to cross a threshold.
+    search_x = max(2, (right - left) // 22)
+    search_y = max(2, (bottom - top) // 22)
+    top = _snap_edge(gray, "y", left, right, top, search_y)
+    bottom = _snap_edge(gray, "y", left, right, bottom, search_y)
+    left = _snap_edge(gray, "x", top, bottom, left, search_x)
+    right = _snap_edge(gray, "x", top, bottom, right, search_x)
 
     # Tiny safety inset to stay off the dark border line itself.
-    inset_x = max(1, (right - left) // 60)
-    inset_y = max(1, (bottom - top) // 60)
+    inset_x = max(1, (right - left) // 80)
+    inset_y = max(1, (bottom - top) // 80)
     left = min(right - 1, left + inset_x)
     right = max(left + 1, right - inset_x)
     top = min(bottom - 1, top + inset_y)
     bottom = max(top + 1, bottom - inset_y)
     return left, top, right, bottom
+
+
+def _snap_edge(gray, axis, fixed_lo, fixed_hi, pos, search):
+    """Move an edge to the row/column of strongest luminance gradient nearby.
+
+    `axis` is "y" for a horizontal edge at row `pos` (snapped across columns
+    fixed_lo..fixed_hi) or "x" for a vertical edge at column `pos`. The search
+    is confined to ±`search` pixels so a high-contrast object inside the photo
+    cannot pull the edge far from its content-based estimate.
+    """
+    height, width = gray.shape[:2]
+    fixed_lo = max(0, int(fixed_lo))
+    fixed_hi = max(fixed_lo + 1, int(fixed_hi))
+    if axis == "y":
+        lo = max(1, int(pos) - search)
+        hi = min(height - 1, int(pos) + search)
+        if hi <= lo:
+            return int(pos)
+        strip = gray[lo - 1:hi + 1, fixed_lo:fixed_hi].astype(float)
+        grad = np.abs(strip[2:] - strip[:-2]).mean(axis=1)
+    else:
+        lo = max(1, int(pos) - search)
+        hi = min(width - 1, int(pos) + search)
+        if hi <= lo:
+            return int(pos)
+        strip = gray[fixed_lo:fixed_hi, lo - 1:hi + 1].astype(float)
+        grad = np.abs(strip[:, 2:] - strip[:, :-2]).mean(axis=0)
+    if grad.size == 0:
+        return int(pos)
+    return lo + int(np.argmax(grad))
 
 
 def _content_band(profile, centre_index, offset):
@@ -347,21 +396,24 @@ def split_axis_by_separators(gray, axis):
     return trim_blank_spans(gray, spans, axis)
 
 
-def boxes_from_spans(spans, lower, upper, axis, scale):
+def boxes_from_spans(gray, spans, lower, upper, axis, scale):
     boxes = []
     for start, end in spans:
         if axis == "x":
-            boxes.append(scaled_box(start, lower, end, upper, scale, confidence=0.78))
+            x0, x1, y0, y1 = start, end, lower, upper
         else:
-            boxes.append(scaled_box(lower, start, upper, end, scale, confidence=0.78))
+            x0, x1, y0, y1 = lower, upper, start, end
+        left, top, right, bottom = refine_slot(gray, x0, x1, y0, y1)
+        boxes.append(scaled_box(left, top, right, bottom, scale, confidence=0.78))
     return boxes
 
 
-def boxes_from_grid(row_spans, col_spans, scale):
+def boxes_from_grid(gray, row_spans, col_spans, scale):
     boxes = []
     for top, bottom in row_spans:
         for left, right in col_spans:
-            boxes.append(scaled_box(left, top, right, bottom, scale, confidence=0.82))
+            l, t, r, b = refine_slot(gray, left, right, top, bottom)
+            boxes.append(scaled_box(l, t, r, b, scale, confidence=0.82))
     return boxes
 
 
