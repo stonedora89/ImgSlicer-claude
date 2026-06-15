@@ -234,14 +234,87 @@ def detect_contact_sheet(gray, scale):
         for index in range(6):
             col_start = int(round(main_x_end * index / 6.0))
             col_end = int(round(main_x_end * (index + 1) / 6.0))
-            inset_x = max(2, (col_end - col_start) // 28)
-            inset_y = max(2, (row_end - row_start) // 18)
-            left = col_start + inset_x
-            right = max(left + 1, col_end - inset_x)
-            top = row_start + max(1, (row_end - row_start) // 6) + inset_y
-            bottom = max(top + 1, row_end - max(1, (row_end - row_start) // 6) - inset_y)
+            left, top, right, bottom = refine_contact_cell(
+                gray, col_start, col_end, row_start, row_end
+            )
             boxes.append(scaled_box(left, top, right, bottom, scale, confidence=0.92))
     return boxes if len(boxes) == 36 else []
+
+
+def refine_contact_cell(gray, col_start, col_end, row_start, row_end):
+    """Converge onto the true photo edges inside a contact-sheet slot.
+
+    The slot from the equal-width column division and the row band is generous:
+    it includes the thin black frame separators on the left/right and the dark
+    sprocket / inter-strip gutter above and below. Instead of chopping a fixed
+    1/6 off every side (which cut into the photo), we locate the dark gutters
+    that bound the photo and snap just inside them.
+    """
+    height, width = gray.shape[:2]
+    col_start = max(0, min(width - 1, col_start))
+    col_end = max(col_start + 1, min(width, col_end))
+    row_start = max(0, min(height - 1, row_start))
+    row_end = max(row_start + 1, min(height, row_end))
+
+    def is_body(section):
+        return ((section > 45) & (section < 250)).astype(float)
+
+    # --- Vertical edges: search a window padded past the row band so we can see
+    # the dark gutters above and below, then keep the high-content band that
+    # contains the slot centre.
+    pad_y = max(4, (row_end - row_start) // 3)
+    y0 = max(0, row_start - pad_y)
+    y1 = min(height, row_end + pad_y)
+    centre_y = (row_start + row_end) // 2
+    col = gray[y0:y1, col_start:col_end]
+    top, bottom = _content_band(is_body(col).mean(axis=1), centre_y - y0, y0)
+    if top is None:
+        top, bottom = row_start, row_end
+
+    # --- Horizontal edges: within the refined vertical extent, trim the black
+    # frame separators on the left/right of the slot.
+    pad_x = max(2, (col_end - col_start) // 6)
+    x0 = max(0, col_start - pad_x)
+    x1 = min(width, col_end + pad_x)
+    centre_x = (col_start + col_end) // 2
+    rowsec = gray[max(0, top):max(top + 1, bottom), x0:x1]
+    left, right = _content_band(is_body(rowsec).mean(axis=0), centre_x - x0, x0)
+    if left is None:
+        left, right = col_start, col_end
+
+    # Tiny safety inset to stay off the dark border line itself.
+    inset_x = max(1, (right - left) // 60)
+    inset_y = max(1, (bottom - top) // 60)
+    left = min(right - 1, left + inset_x)
+    right = max(left + 1, right - inset_x)
+    top = min(bottom - 1, top + inset_y)
+    bottom = max(top + 1, bottom - inset_y)
+    return left, top, right, bottom
+
+
+def _content_band(profile, centre_index, offset):
+    """Return (start, end) absolute bounds of the content band around centre.
+
+    `profile` is a 1-D array of body-content ratios; the band is the run of
+    above-threshold samples that contains `centre_index`. Falls back to the
+    largest run if the centre sits in a gap.
+    """
+    n = len(profile)
+    if n == 0:
+        return None, None
+    smoothed = moving_average(profile, max(2, n // 25))
+    peak = float(smoothed.max())
+    if peak <= 0:
+        return None, None
+    threshold = max(0.25, peak * 0.5)
+    runs = segments(smoothed, threshold, max(2, n // 12), greater=True)
+    if not runs:
+        return None, None
+    centre_index = max(0, min(n - 1, centre_index))
+    containing = [r for r in runs if r[0] <= centre_index < r[1]]
+    start, end = (containing[0] if containing
+                 else max(runs, key=lambda r: r[1] - r[0]))
+    return offset + start, offset + end
 
 
 def split_axis_by_separators(gray, axis):

@@ -28,7 +28,14 @@ cp "$BIN_DIR/$APP_NAME" "$MACOS/$APP_NAME"
 cp "Sources/ImgSlicer/Resources/icon.svg" "$RESOURCES/icon.svg"
 mkdir -p "$RESOURCES/detectors"
 cp "Sources/ImgSlicer/Resources/detectors/opencv_detector.py" "$RESOURCES/detectors/opencv_detector.py"
-if [ -d "$ROOT_DIR/.venv" ]; then
+# Bundle a self-contained, relocatable Python (with OpenCV) so the OpenCV
+# detector works on any Apple Silicon Mac, even without Xcode Command Line
+# Tools or Homebrew. Falls back to the local .venv only if the vendored
+# runtime is missing.
+if [ -d "$ROOT_DIR/vendor/python-standalone" ]; then
+  ditto "$ROOT_DIR/vendor/python-standalone" "$RESOURCES/python"
+elif [ -d "$ROOT_DIR/.venv" ]; then
+  echo "WARNING: vendor/python-standalone missing — bundling .venv (NOT portable to other Macs)"
   ditto "$ROOT_DIR/.venv" "$RESOURCES/python"
 fi
 swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/icon.svg"
