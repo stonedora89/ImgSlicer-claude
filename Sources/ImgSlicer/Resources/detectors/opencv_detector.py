@@ -242,25 +242,24 @@ def detect_contact_sheet(gray, scale):
 
 
 def refine_contact_cell(gray, col_start, col_end, row_start, row_end):
-    """Contact-sheet slot: pad outward to find the sprocket/gutter bands."""
+    """Contact-sheet slot: pad outward to find the photo/sprocket boundary."""
     return refine_slot(
         gray, col_start, col_end, row_start, row_end,
-        pad_x_frac=1.0 / 6.0, pad_y_frac=1.0 / 3.0,
+        pad_x_frac=0.12, pad_y_frac=0.22,
     )
 
 
-def refine_slot(gray, x0, x1, y0, y1, pad_x_frac=0.0, pad_y_frac=0.0):
+def refine_slot(gray, x0, x1, y0, y1, pad_x_frac=0.12, pad_y_frac=0.12):
     """Converge a candidate slot onto the true photo edges.
 
-    A slot produced by equal division or separator spans is generous: it
-    includes blank scanner bed, inter-frame gutters and thin black borders.
-    Rather than trusting those boundaries, we locate the contiguous run of
-    actual image content (the "body") on each axis and snap just inside it.
-
-    `pad_*_frac` optionally widens the search window past the slot so an edge
-    that sits a little outside the slot (e.g. the sprocket band on a contact
-    sheet) can still be found; with the default 0 the slot is only trimmed
-    inward, which tightens loose grid/strip boxes onto the photo.
+    Slots from equal division or separator spans are imperfect in both
+    directions: they can include the blank scanner bed / dark gutter (box too
+    big) or cut into the photo (box too small). On each axis we locate the
+    photo *body* — the contiguous run of mid-tone content — while explicitly
+    rejecting the film's sprocket band (bright perforations on a black base),
+    so the box neither leaks into the holes nor stops short of the subject. A
+    small outward pad lets a subject that spilled past the slot edge be
+    recovered.
     """
     height, width = gray.shape[:2]
     x0 = max(0, min(width - 1, int(round(x0))))
@@ -268,38 +267,22 @@ def refine_slot(gray, x0, x1, y0, y1, pad_x_frac=0.0, pad_y_frac=0.0):
     y0 = max(0, min(height - 1, int(round(y0))))
     y1 = max(y0 + 1, min(height, int(round(y1))))
 
-    def is_body(section):
-        return ((section > 45) & (section < 250)).astype(float)
-
     # --- Vertical edges ---
     pad_y = max(0, int((y1 - y0) * pad_y_frac))
     sy0 = max(0, y0 - pad_y)
     sy1 = min(height, y1 + pad_y)
-    centre_y = (y0 + y1) // 2
-    col = gray[sy0:sy1, x0:x1]
-    top, bottom = _content_band(is_body(col).mean(axis=1), centre_y - sy0, sy0)
-    if top is None:
-        top, bottom = y0, y1
+    band = _photo_band(gray[sy0:sy1, x0:x1], axis="rows", centre=(y0 + y1) // 2 - sy0)
+    top, bottom = (sy0 + band[0], sy0 + band[1]) if band else (y0, y1)
 
     # --- Horizontal edges (within the refined vertical extent) ---
     pad_x = max(0, int((x1 - x0) * pad_x_frac))
     sx0 = max(0, x0 - pad_x)
     sx1 = min(width, x1 + pad_x)
-    centre_x = (x0 + x1) // 2
-    rowsec = gray[max(0, top):max(top + 1, bottom), sx0:sx1]
-    left, right = _content_band(is_body(rowsec).mean(axis=0), centre_x - sx0, sx0)
-    if left is None:
-        left, right = x0, x1
-
-    # Snap each edge to the strongest local luminance transition (the actual
-    # photo border against the gutter/scanner bed) so the box sits exactly on
-    # the edge instead of where the content ratio happened to cross a threshold.
-    search_x = max(2, (right - left) // 22)
-    search_y = max(2, (bottom - top) // 22)
-    top = _snap_edge(gray, "y", left, right, top, search_y)
-    bottom = _snap_edge(gray, "y", left, right, bottom, search_y)
-    left = _snap_edge(gray, "x", top, bottom, left, search_x)
-    right = _snap_edge(gray, "x", top, bottom, right, search_x)
+    band = _photo_band(
+        gray[max(0, top):max(top + 1, bottom), sx0:sx1],
+        axis="cols", centre=(x0 + x1) // 2 - sx0,
+    )
+    left, right = (sx0 + band[0], sx0 + band[1]) if band else (x0, x1)
 
     # Tiny safety inset to stay off the dark border line itself.
     inset_x = max(1, (right - left) // 80)
@@ -311,75 +294,78 @@ def refine_slot(gray, x0, x1, y0, y1, pad_x_frac=0.0, pad_y_frac=0.0):
     return left, top, right, bottom
 
 
-def _snap_edge(gray, axis, fixed_lo, fixed_hi, pos, search):
-    """Move an edge to the row/column of strongest luminance gradient nearby.
+def _photo_band(section, axis, centre):
+    """Bounds (start, end) of the photo body along `axis` within `section`.
 
-    `axis` is "y" for a horizontal edge at row `pos` (snapped across columns
-    fixed_lo..fixed_hi) or "x" for a vertical edge at column `pos`. The search
-    is confined to ±`search` pixels so a high-contrast object inside the photo
-    cannot pull the edge far from its content-based estimate.
+    Each line is scored by its mid-tone content minus a sprocket penalty:
+    lines that mix bright perforations with a dark film base (the sprocket
+    band) score low, so the photo's true edge against that band is found
+    instead of the high-contrast hole edges. Returns the above-threshold run
+    containing `centre`, or the largest run if the centre sits in a gap.
     """
-    height, width = gray.shape[:2]
-    fixed_lo = max(0, int(fixed_lo))
-    fixed_hi = max(fixed_lo + 1, int(fixed_hi))
-    if axis == "y":
-        lo = max(1, int(pos) - search)
-        hi = min(height - 1, int(pos) + search)
-        if hi <= lo:
-            return int(pos)
-        strip = gray[lo - 1:hi + 1, fixed_lo:fixed_hi].astype(float)
-        grad = np.abs(strip[2:] - strip[:-2]).mean(axis=1)
-    else:
-        lo = max(1, int(pos) - search)
-        hi = min(width - 1, int(pos) + search)
-        if hi <= lo:
-            return int(pos)
-        strip = gray[fixed_lo:fixed_hi, lo - 1:hi + 1].astype(float)
-        grad = np.abs(strip[:, 2:] - strip[:, :-2]).mean(axis=0)
-    if grad.size == 0:
-        return int(pos)
-    return lo + int(np.argmax(grad))
-
-
-def _content_band(profile, centre_index, offset):
-    """Return (start, end) absolute bounds of the content band around centre.
-
-    `profile` is a 1-D array of body-content ratios; the band is the run of
-    above-threshold samples that contains `centre_index`. Falls back to the
-    largest run if the centre sits in a gap.
-    """
-    n = len(profile)
-    if n == 0:
-        return None, None
-    smoothed = moving_average(profile, max(2, n // 25))
+    if section.size == 0:
+        return None
+    reduce_axis = 1 if axis == "rows" else 0
+    sec = section.astype(float)
+    body = ((sec > 45) & (sec < 248)).mean(axis=reduce_axis)
+    white = (sec >= 245).mean(axis=reduce_axis)
+    dark = (sec <= 40).mean(axis=reduce_axis)
+    sprocket = np.where(
+        (white >= 0.05) & (dark >= 0.12),
+        np.minimum(0.7, white * 1.7 + dark * 0.5),
+        0.0,
+    )
+    score = np.clip(body - sprocket, 0.0, 1.0)
+    n = len(score)
+    smoothed = moving_average(score, max(2, n // 25))
     peak = float(smoothed.max())
     if peak <= 0:
-        return None, None
-    threshold = max(0.25, peak * 0.5)
+        return None
+    threshold = max(0.30, peak * 0.55)
     runs = segments(smoothed, threshold, max(2, n // 12), greater=True)
     if not runs:
-        return None, None
-    centre_index = max(0, min(n - 1, centre_index))
-    containing = [r for r in runs if r[0] <= centre_index < r[1]]
-    start, end = (containing[0] if containing
-                 else max(runs, key=lambda r: r[1] - r[0]))
-    return offset + start, offset + end
+        return None
+    centre = max(0, min(n - 1, int(centre)))
+    containing = [r for r in runs if r[0] <= centre < r[1]]
+    start, end = containing[0] if containing else max(runs, key=lambda r: r[1] - r[0])
+    return start, end
+
+
+def separator_profile(gray, axis):
+    """Per-line "separator-ness" in [0, 1] for the given split axis.
+
+    A real gutter between photos is a band that runs across the *whole*
+    perpendicular extent and is uniform — either uniformly dark (film
+    sprocket gutters, black borders) or uniformly bright (white scanner bed,
+    print margins). We score each line by how uniform it is (low variance
+    across the perpendicular axis) AND how extreme its tone is, then add a
+    small boundary-edge term.
+
+    Keying on uniformity is what separates a true full-width gutter from a
+    band of film perforations, whose alternating holes and frame edges make
+    the line dark *on average* but highly non-uniform — the old darkness-only
+    profile mistook those for separators and over-segmented the layout.
+    """
+    g = gray.astype(float)
+    reduce_axis = 0 if axis == "x" else 1
+    line_std = g.std(axis=reduce_axis)
+    dark = (gray <= 70).mean(axis=reduce_axis)
+    bright = (gray >= 200).mean(axis=reduce_axis)
+    edge_profile = np_absdiff(gray, axis=1 if axis == "x" else 0)
+
+    uniform = np.clip((40.0 - line_std) / 40.0, 0.0, 1.0)
+    extreme = np.maximum(dark, bright)
+    edge_max = max(float(edge_profile.max()), 1.0)
+    score = uniform * (0.30 + 0.70 * extreme) + (edge_profile / edge_max) * 0.15
+    return np.clip(score, 0.0, 1.0)
 
 
 def split_axis_by_separators(gray, axis):
     height, width = gray.shape[:2]
-    if axis == "x":
-        dark_profile = (gray <= 62).mean(axis=0)
-        edge_profile = np_absdiff(gray, axis=1)
-        full = width
-    else:
-        dark_profile = (gray <= 62).mean(axis=1)
-        edge_profile = np_absdiff(gray, axis=0)
-        full = height
+    full = width if axis == "x" else height
 
-    edge_max = max(float(edge_profile.max()), 1.0)
-    profile = moving_average(dark_profile * 1.9 + (edge_profile / edge_max) * 0.38, max(3, full // 180))
-    threshold = max(0.18, min(0.72, float(np_median(profile) + np_std(profile) * 1.35)))
+    profile = moving_average(separator_profile(gray, axis), max(3, full // 180))
+    threshold = max(0.22, min(0.80, float(np_median(profile) + np_std(profile) * 1.2)))
     separator_segments = segments(profile, threshold, max(2, full // 420), greater=True)
     separator_segments = merge_segments(separator_segments, max(2, full // 260))
 
