@@ -307,22 +307,29 @@ def _photo_band(section, axis, centre):
         return None
     reduce_axis = 1 if axis == "rows" else 0
     sec = section.astype(float)
-    body = ((sec > 45) & (sec < 248)).mean(axis=reduce_axis)
-    white = (sec >= 245).mean(axis=reduce_axis)
-    dark = (sec <= 40).mean(axis=reduce_axis)
-    sprocket = np.where(
-        (white >= 0.05) & (dark >= 0.12),
-        np.minimum(0.7, white * 1.7 + dark * 0.5),
-        0.0,
-    )
-    score = np.clip(body - sprocket, 0.0, 1.0)
+    # Texture (variation along the line) is what tells a photo from a gutter:
+    # a real gutter is flat and tone-extreme (white scanner bed / black film
+    # base); a photo line has texture even where it is dark or bright. Keying
+    # on texture instead of a brightness threshold stops dark photo edges from
+    # being mistaken for a gutter and trimmed away.
+    texture = sec.std(axis=reduce_axis)
+    white = (sec >= 244).mean(axis=reduce_axis)
+    dark = (sec <= 42).mean(axis=reduce_axis)
+    uniform = np.clip((28.0 - texture) / 28.0, 0.0, 1.0)
+    extreme = np.maximum(white, dark)
+    gutter = uniform * extreme
+    sprocket = ((white >= 0.05) & (dark >= 0.12)).astype(float)
+    score = texture * (1.0 - 0.9 * gutter) * (1.0 - 0.85 * sprocket)
     n = len(score)
     smoothed = moving_average(score, max(2, n // 25))
     peak = float(smoothed.max())
     if peak <= 0:
         return None
-    threshold = max(0.30, peak * 0.55)
-    runs = segments(smoothed, threshold, max(2, n // 12), greater=True)
+    threshold = peak * 0.32
+    runs = merge_segments(
+        segments(smoothed, threshold, max(2, n // 14), greater=True),
+        max(2, n // 20),
+    )
     if not runs:
         return None
     centre = max(0, min(n - 1, int(centre)))
@@ -356,8 +363,18 @@ def separator_profile(gray, axis):
     uniform = np.clip((40.0 - line_std) / 40.0, 0.0, 1.0)
     extreme = np.maximum(dark, bright)
     edge_max = max(float(edge_profile.max()), 1.0)
-    score = uniform * (0.30 + 0.70 * extreme) + (edge_profile / edge_max) * 0.15
-    return np.clip(score, 0.0, 1.0)
+
+    # Two complementary separator signals, combined by max():
+    #   * uniform_gutter — a band uniform across the whole perpendicular
+    #     extent and extreme in tone. Finds clean white margins / dark
+    #     gutters and, crucially, *rejects* film-perforation bands (high
+    #     variance) that the darkness-only profile used to over-segment on.
+    #   * dark_line — average darkness plus boundary edges. Recovers the
+    #     thin, faint inter-frame borders that are too narrow / non-uniform
+    #     for the uniformity test to catch.
+    uniform_gutter = uniform * (0.30 + 0.70 * extreme)
+    dark_line = dark * 1.9 + (edge_profile / edge_max) * 0.38
+    return np.clip(np.maximum(uniform_gutter, dark_line), 0.0, 1.0)
 
 
 def split_axis_by_separators(gray, axis):
@@ -369,17 +386,19 @@ def split_axis_by_separators(gray, axis):
     separator_segments = segments(profile, threshold, max(2, full // 420), greater=True)
     separator_segments = merge_segments(separator_segments, max(2, full // 260))
 
+    # Tile the axis at the CENTRE of each separator so adjacent frames meet
+    # with no gap: content that a wide separator band would otherwise swallow
+    # stays inside one of the two neighbours. refine_slot trims the half-gutter
+    # back to each photo's real edge afterwards.
+    cuts = [(start + end) // 2 for start, end in separator_segments]
+    bounds = [0] + cuts + [full]
     spans = []
-    cursor = 0
     min_span = max(24, full // 18)
-    for start, end in separator_segments:
-        if start - cursor >= min_span:
-            spans.append((cursor, start))
-        cursor = max(cursor, end)
-    if full - cursor >= min_span:
-        spans.append((cursor, full))
+    for a, b in zip(bounds, bounds[1:]):
+        if b - a >= min_span:
+            spans.append((a, b))
 
-    return trim_blank_spans(gray, spans, axis)
+    return spans
 
 
 def boxes_from_spans(gray, spans, lower, upper, axis, scale):
@@ -398,7 +417,13 @@ def boxes_from_grid(gray, row_spans, col_spans, scale):
     boxes = []
     for top, bottom in row_spans:
         for left, right in col_spans:
-            l, t, r, b = refine_slot(gray, left, right, top, bottom)
+            # Allow a little outward search so a cell whose span was clipped
+            # by an over-eager separator (e.g. a bright sky band read as a
+            # gutter) can snap back out to the real frame edges.
+            l, t, r, b = refine_slot(
+                gray, left, right, top, bottom,
+                pad_x_frac=0.06, pad_y_frac=0.06,
+            )
             boxes.append(scaled_box(l, t, r, b, scale, confidence=0.82))
     return boxes
 
