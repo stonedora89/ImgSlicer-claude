@@ -19,6 +19,10 @@ struct ImgSlicerApp: App {
             command.run()
             Foundation.exit(0)
         }
+        if let command = BenchmarkCommand.parse(arguments: CommandLine.arguments) {
+            command.run()
+            Foundation.exit(0)
+        }
         AppIcon.install()
     }
 
