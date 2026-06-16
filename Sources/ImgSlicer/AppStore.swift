@@ -318,27 +318,68 @@ final class AppStore: ObservableObject {
 
     func applyCurrentCropToSelectedFolder() {
         guard let indexes = selectedIndexes(),
-              !tasks[indexes.task].photos[indexes.photo].cropRegions.isEmpty else { return }
+              !tasks[indexes.task].photos[indexes.photo].cropRegions.isEmpty,
+              let template = selectedTemplateRegion(taskIndex: indexes.task, photoIndex: indexes.photo)?.rect.normalizedCropRect else { return }
 
-        let sourcePhoto = tasks[indexes.task].photos[indexes.photo]
-        let sourceRegions = sourcePhoto.cropRegions.enumerated().map { offset, region in
-            CropRegion(index: offset + 1, rect: region.rect.normalizedCropRect, isManual: true)
+        // Use the adjusted sample as a SIZE reference: re-detect every other
+        // image on its own, then calibrate each detected box's edges by the
+        // sample's offset. This fits the per-image content while matching the
+        // sample's framing — instead of copying the sample's box layout/count
+        // verbatim onto images it does not fit.
+        let taskIndex = indexes.task
+        let taskID = tasks[taskIndex].id
+        let sourceID = tasks[taskIndex].photos[indexes.photo].id
+        let currentSettings = settings
+        let sampleProfiles = sampleLibrary.load(rootURL: tasks[taskIndex].rootURL)
+
+        let targets: [(id: PhotoItem.ID, url: URL)] = tasks[taskIndex].photos.compactMap { photo in
+            (photo.id == sourceID || photo.isManual) ? nil : (id: photo.id, url: photo.url)
+        }
+        guard !targets.isEmpty else {
+            logMessage = "没有需要校准的图片（其它图片都已手动调整）。"
+            return
         }
 
-        for photoIndex in tasks[indexes.task].photos.indices {
-            tasks[indexes.task].photos[photoIndex].cropRegions = sourceRegions.enumerated().map { offset, region in
-                CropRegion(index: offset + 1, rect: region.rect, isManual: true)
+        let targetIDs = Set(targets.map(\.id))
+        for photoIndex in tasks[taskIndex].photos.indices where targetIDs.contains(tasks[taskIndex].photos[photoIndex].id) {
+            tasks[taskIndex].photos[photoIndex].status = .locating
+        }
+        tasks[taskIndex].detail = "正在按样图尺寸校准整个文件夹"
+        logMessage = "正在按样图框尺寸重新识别文件夹内 \(targets.count) 张图片。"
+        logSubMessage = "每张图各自识别，再按样图边缘统一校准尺寸。"
+
+        Task { [weak self, processor, currentSettings, sampleProfiles, targets, template, taskID] in
+            for target in targets {
+                let detected = await Task.detached {
+                    processor.detectCropCandidates(for: target.url, settings: currentSettings, sampleProfiles: sampleProfiles).first?.regions ?? []
+                }.value
+                self?.applyFolderTemplate(detectedRegions: detected, template: template, taskID: taskID, photoID: target.id)
             }
-            tasks[indexes.task].photos[photoIndex].isManual = true
-            tasks[indexes.task].photos[photoIndex].status = .manual
-            tasks[indexes.task].photos[photoIndex].selectedCandidateID = sourcePhoto.selectedCandidateID
+            self?.finishFolderTemplateApply(taskID: taskID, count: targets.count)
         }
+    }
 
-        tasks[indexes.task].status = .needsReview
-        tasks[indexes.task].detail = "已将当前裁切框应用到全部图片"
-        editStore.save(photos: tasks[indexes.task].photos, in: tasks[indexes.task])
-        logMessage = "已应用到当前文件夹全部 \(tasks[indexes.task].photos.count) 张图片。"
-        logSubMessage = "后续输出会优先使用这组已确认裁切框。"
+    private func applyFolderTemplate(detectedRegions: [CropRegion], template: CGRect, taskID: FolderTask.ID, photoID: PhotoItem.ID) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }),
+              let photoIndex = tasks[taskIndex].photos.firstIndex(where: { $0.id == photoID }) else { return }
+
+        let regions = detectedRegions.count > 1
+            ? relativeTemplateRegions(from: detectedRegions, template: template)
+            : tiledRegions(anchor: template)
+        tasks[taskIndex].photos[photoIndex].cropRegions = regions
+        tasks[taskIndex].photos[photoIndex].isManual = true
+        tasks[taskIndex].photos[photoIndex].status = .manual
+        tasks[taskIndex].photos[photoIndex].selectedCandidateID = nil
+        editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
+    }
+
+    private func finishFolderTemplateApply(taskID: FolderTask.ID, count: Int) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tasks[taskIndex].status = .needsReview
+        tasks[taskIndex].detail = "已按样图尺寸校准整个文件夹"
+        editStore.save(photos: tasks[taskIndex].photos, in: tasks[taskIndex])
+        logMessage = "已按样图尺寸重新识别并校准 \(count) 张图片。"
+        logSubMessage = "每张图各自识别后按样图边缘统一校准，可继续微调。"
     }
 
     func retileSelectedPhotoFromTemplate() {

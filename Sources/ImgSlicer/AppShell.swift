@@ -584,7 +584,7 @@ struct ParameterPanel: View {
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.green))
                     .disabled(!store.canApplyCurrentCropToFolder)
-                    .help("将当前图片的裁切框应用到当前文件夹内未手动调整的图片")
+                    .help("以当前图片为样图：按它的框尺寸，对文件夹内其它未手动调整的图片各自重新识别并校准")
                 }
             }
             .padding(16)
