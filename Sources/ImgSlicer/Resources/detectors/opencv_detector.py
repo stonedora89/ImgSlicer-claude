@@ -402,30 +402,58 @@ def split_axis_by_separators(gray, axis):
 
 
 def boxes_from_spans(gray, spans, lower, upper, axis, scale):
-    boxes = []
+    cells = []
     for start, end in spans:
         if axis == "x":
             x0, x1, y0, y1 = start, end, lower, upper
         else:
             x0, x1, y0, y1 = lower, upper, start, end
-        left, top, right, bottom = refine_slot(gray, x0, x1, y0, y1)
-        boxes.append(scaled_box(left, top, right, bottom, scale, confidence=0.78))
-    return boxes
+        cells.append(refine_slot(gray, x0, x1, y0, y1))
+    cells = tile_gaps(cells, axis=axis)
+    return [scaled_box(l, t, r, b, scale, confidence=0.78) for (l, t, r, b) in cells]
 
 
 def boxes_from_grid(gray, row_spans, col_spans, scale):
     boxes = []
     for top, bottom in row_spans:
+        cells = []
         for left, right in col_spans:
             # Allow a little outward search so a cell whose span was clipped
             # by an over-eager separator (e.g. a bright sky band read as a
             # gutter) can snap back out to the real frame edges.
-            l, t, r, b = refine_slot(
+            cells.append(refine_slot(
                 gray, left, right, top, bottom,
                 pad_x_frac=0.06, pad_y_frac=0.06,
-            )
+            ))
+        # Photos in a contact-print strip sit edge to edge; close the small
+        # gaps/overlaps left between neighbours so no content falls into an
+        # uncovered sliver between two frames.
+        cells = tile_gaps(cells, axis="x")
+        for l, t, r, b in cells:
             boxes.append(scaled_box(l, t, r, b, scale, confidence=0.82))
     return boxes
+
+
+def tile_gaps(cells, axis):
+    """Make adjacent refined cells meet at the midpoint of the space between
+    them, along `axis` ("x" or "y").
+
+    Only small gaps/overlaps are closed — a thin inter-frame gutter or an edge
+    that a separator clipped — not a genuinely wide blank, so truly separate
+    photos are left alone.
+    """
+    if len(cells) < 2:
+        return cells
+    lo, hi = (0, 2) if axis == "x" else (1, 3)
+    out = [list(c) for c in sorted(cells, key=lambda c: c[lo])]
+    for a, b in zip(out, out[1:]):
+        gap = b[lo] - a[hi]
+        smaller = min(a[hi] - a[lo], b[hi] - b[lo])
+        if abs(gap) <= 0.8 * max(1.0, smaller):
+            mid = (a[hi] + b[lo]) / 2.0
+            a[hi] = mid
+            b[lo] = mid
+    return [tuple(c) for c in out]
 
 
 def dominant_spans(spans, limit):
