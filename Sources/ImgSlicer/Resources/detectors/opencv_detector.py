@@ -307,25 +307,29 @@ def _photo_band(section, axis, centre):
         return None
     reduce_axis = 1 if axis == "rows" else 0
     sec = section.astype(float)
-    # Texture (variation along the line) is what tells a photo from a gutter:
-    # a real gutter is flat and tone-extreme (white scanner bed / black film
-    # base); a photo line has texture even where it is dark or bright. Keying
-    # on texture instead of a brightness threshold stops dark photo edges from
-    # being mistaken for a gutter and trimmed away.
+    # A line counts as photo if it carries mid-tone content OR texture. This is
+    # the key: a SMOOTH dark/bright region inside the picture (a shaded shop, a
+    # wall, the sky) has little texture but plenty of mid-tone content, so it is
+    # kept — an internal tonal transition is no longer mistaken for a frame
+    # edge. A line is only suppressed when it is the real boundary: a flat,
+    # tone-extreme gutter (black film base / white scanner bed) or a sprocket
+    # band (bright holes on a dark base).
     texture = sec.std(axis=reduce_axis)
-    white = (sec >= 244).mean(axis=reduce_axis)
-    dark = (sec <= 42).mean(axis=reduce_axis)
-    uniform = np.clip((28.0 - texture) / 28.0, 0.0, 1.0)
+    body = ((sec > 40) & (sec < 245)).mean(axis=reduce_axis)
+    white = (sec >= 246).mean(axis=reduce_axis)
+    dark = (sec <= 38).mean(axis=reduce_axis)
+    uniform = np.clip((26.0 - texture) / 26.0, 0.0, 1.0)
     extreme = np.maximum(white, dark)
     gutter = uniform * extreme
     sprocket = ((white >= 0.05) & (dark >= 0.12)).astype(float)
-    score = texture * (1.0 - 0.9 * gutter) * (1.0 - 0.85 * sprocket)
+    photo = np.maximum(body, np.clip(texture / 38.0, 0.0, 1.0))
+    score = photo * (1.0 - 0.9 * gutter) * (1.0 - 0.85 * sprocket)
     n = len(score)
     smoothed = moving_average(score, max(2, n // 25))
     peak = float(smoothed.max())
     if peak <= 0:
         return None
-    threshold = peak * 0.32
+    threshold = peak * 0.45
     runs = merge_segments(
         segments(smoothed, threshold, max(2, n // 14), greater=True),
         max(2, n // 20),
