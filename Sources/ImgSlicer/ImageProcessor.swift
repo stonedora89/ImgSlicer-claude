@@ -1439,28 +1439,45 @@ struct ImageProcessor: Sendable {
 
     private func trimUniformBlackEdges(gray: [UInt8], width: Int, height: Int, box: IntBox) -> IntBox {
         guard box.isValid else { return box }
-        let maxTrimX = max(1, Int(Double(box.width) * 0.08))
-        let maxTrimY = max(1, Int(Double(box.height) * 0.08))
+        // Black film base / inter-frame gutters can be wider than the old 8%
+        // cap, leaving a black margin on the crop. Allow trimming up to 20%,
+        // but make the test specific to *film base* rather than "dark": a line
+        // is trimmed only when it is near-black (≤ blackLevel) AND uniform (a
+        // bright-pixel escape hatch). A dark but textured subject (a shaded
+        // wooden door, a deep shadow) carries some brighter pixels and survives,
+        // so we stop eating into the photo where the old darkness-only test did.
+        let maxTrimX = max(1, Int(Double(box.width) * 0.20))
+        let maxTrimY = max(1, Int(Double(box.height) * 0.20))
+        let blackLevel: UInt8 = 50
+        let brightLevel: UInt8 = 110
 
-        func columnDarkRatio(_ x: Int) -> Double {
+        func isFilmBaseColumn(_ x: Int) -> Bool {
             var dark = 0
-            for y in box.top..<box.bottom where gray[y * width + x] <= 65 {
-                dark += 1
+            var bright = 0
+            for y in box.top..<box.bottom {
+                let v = gray[y * width + x]
+                if v <= blackLevel { dark += 1 }
+                if v >= brightLevel { bright += 1 }
             }
-            return Double(dark) / Double(max(1, box.height))
+            let total = Double(max(1, box.height))
+            return Double(dark) / total >= 0.92 && Double(bright) / total <= 0.02
         }
 
-        func rowDarkRatio(_ y: Int) -> Double {
+        func isFilmBaseRow(_ y: Int) -> Bool {
             var dark = 0
-            for x in box.left..<box.right where gray[y * width + x] <= 65 {
-                dark += 1
+            var bright = 0
+            for x in box.left..<box.right {
+                let v = gray[y * width + x]
+                if v <= blackLevel { dark += 1 }
+                if v >= brightLevel { bright += 1 }
             }
-            return Double(dark) / Double(max(1, box.width))
+            let total = Double(max(1, box.width))
+            return Double(dark) / total >= 0.92 && Double(bright) / total <= 0.02
         }
 
         var trimLeft = 0
         for offset in 0..<min(maxTrimX, box.width) {
-            if columnDarkRatio(box.left + offset) >= 0.90 {
+            if isFilmBaseColumn(box.left + offset) {
                 trimLeft = offset + 1
             } else {
                 break
@@ -1471,7 +1488,7 @@ struct ImageProcessor: Sendable {
         let trimRightLimit = min(maxTrimX, box.width)
         if trimRightLimit > 0 {
             for offset in 1...trimRightLimit {
-                if columnDarkRatio(box.right - offset) >= 0.90 {
+                if isFilmBaseColumn(box.right - offset) {
                     trimRight = offset
                 } else {
                     break
@@ -1481,7 +1498,7 @@ struct ImageProcessor: Sendable {
 
         var trimTop = 0
         for offset in 0..<min(maxTrimY, box.height) {
-            if rowDarkRatio(box.top + offset) >= 0.90 {
+            if isFilmBaseRow(box.top + offset) {
                 trimTop = offset + 1
             } else {
                 break
@@ -1492,7 +1509,7 @@ struct ImageProcessor: Sendable {
         let trimBottomLimit = min(maxTrimY, box.height)
         if trimBottomLimit > 0 {
             for offset in 1...trimBottomLimit {
-                if rowDarkRatio(box.bottom - offset) >= 0.90 {
+                if isFilmBaseRow(box.bottom - offset) {
                     trimBottom = offset
                 } else {
                     break

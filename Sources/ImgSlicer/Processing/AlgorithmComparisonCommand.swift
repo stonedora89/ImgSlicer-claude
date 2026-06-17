@@ -75,6 +75,10 @@ struct DetectionOverlayCommand: Sendable {
             try png.write(to: outputURL, options: .atomic)
             print("Wrote overlay: \(outputURL.path)")
             print("Regions: \(regions.count)")
+            for (index, region) in regions.enumerated() {
+                let r = region.rect
+                print(String(format: "  [%d] x=%.4f y=%.4f w=%.4f h=%.4f", index + 1, r.minX, r.minY, r.width, r.height))
+            }
         } catch {
             print("Unable to write overlay: \(error.localizedDescription)")
         }
