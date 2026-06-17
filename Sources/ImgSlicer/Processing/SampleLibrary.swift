@@ -24,7 +24,12 @@ struct SampleLibrary: Sendable {
     func load(rootURL: URL) -> [SampleProfile] {
         let url = samplesURL(rootURL: rootURL)
         guard let data = try? Data(contentsOf: url) else { return [] }
-        return (try? JSONDecoder().decode(SavedSampleLibrary.self, from: data))?.profiles ?? []
+        // Must mirror save()'s `.iso8601` date strategy — with the default
+        // strategy `createdAt` (an ISO8601 string) fails to decode and the
+        // whole library silently loads as empty.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(SavedSampleLibrary.self, from: data))?.profiles ?? []
     }
 
     func save(profile: SampleProfile, rootURL: URL) {

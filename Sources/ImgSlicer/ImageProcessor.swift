@@ -98,8 +98,13 @@ struct ImageProcessor: Sendable {
             return values
         }
 
-        let contactSheetRects = detectContactSheetFrames(luminances: baseLuminances(), width: width, height: height, settings: settings)
+        var contactSheetRects = detectContactSheetFrames(luminances: baseLuminances(), width: width, height: height, settings: settings)
         if contactSheetRects.count >= 20 {
+            // The contact-sheet path emits a single candidate, so sample
+            // guidance can't re-rank its way to a better box — fuse the sample
+            // here instead, calibrating each cell's size to the dimensions the
+            // user's correction taught us.
+            contactSheetRects = calibratedToSample(contactSheetRects, sampleProfiles: sampleProfiles)
             let regions = indexedRegions(from: contactSheetRects, settings: settings)
             appendCandidates(
                 for: regions,
@@ -263,6 +268,50 @@ struct ImageProcessor: Sendable {
                 marginScale: candidate.marginScale,
                 score: guidedScore
             )
+        }
+    }
+
+    /// Calibrate detected cell rects toward the size a saved sample taught us.
+    ///
+    /// Sample guidance only re-ranks candidates, which is useless when a layout
+    /// (like a contact sheet) produces a single candidate. Here we instead pull
+    /// each cell's width/height toward the sample's learned average, anchored on
+    /// the cell centre so the grid position is preserved. This fixes a
+    /// systematic size bias (e.g. cells detected ~8% too tall) that no amount of
+    /// re-ranking could touch.
+    ///
+    /// Guarded so it only fires when the sample plausibly describes this layout:
+    /// the region count must match and the aspect ratio must be in the same
+    /// ballpark. The pull is a partial blend, so a genuinely different image
+    /// still keeps most of its own detected geometry.
+    private func calibratedToSample(_ rects: [CGRect], sampleProfiles: [SampleProfile]) -> [CGRect] {
+        guard !rects.isEmpty else { return rects }
+        let avgWidth = rects.map { Double($0.width) }.average
+        let avgHeight = rects.map { Double($0.height) }.average
+        let aspect = avgWidth / max(avgHeight, 0.001)
+
+        let candidate = sampleProfiles.first { profile in
+            profile.regionCount == rects.count &&
+            abs(log(max(profile.aspectRatio, 0.001)) - log(max(aspect, 0.001))) < 0.30
+        }
+        guard let profile = candidate,
+              profile.averageWidth > 0.01, profile.averageHeight > 0.01 else { return rects }
+
+        let blend = 0.6
+        let targetWidth = avgWidth * (1 - blend) + profile.averageWidth * blend
+        let targetHeight = avgHeight * (1 - blend) + profile.averageHeight * blend
+
+        return rects.map { rect in
+            let cx = rect.midX
+            let cy = rect.midY
+            var newRect = CGRect(
+                x: cx - targetWidth / 2,
+                y: cy - targetHeight / 2,
+                width: targetWidth,
+                height: targetHeight
+            )
+            newRect = newRect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            return newRect.isNull ? rect : newRect
         }
     }
 
@@ -1791,22 +1840,24 @@ struct ImageProcessor: Sendable {
     private func contactSheetSubjectRect(luminances: [Double], width: Int, height: Int, xRange: ClosedRange<Int>, yRange: ClosedRange<Int>) -> CGRect {
         var left = xRange.lowerBound
         var right = xRange.upperBound
-        var top = min(yRange.upperBound, yRange.lowerBound + max(1, yRange.count / 6))
-        var bottom = max(yRange.lowerBound, yRange.upperBound - max(1, yRange.count / 6))
         let slotInsetX = max(2, xRange.count / 28)
-        let slotInsetY = max(2, yRange.count / 18)
         left = min(right, left + slotInsetX)
         right = max(left, right - slotInsetX)
-        top = min(bottom, top + slotInsetY)
-        bottom = max(top, bottom - slotInsetY)
-        let fallbackTop = top
-        let fallbackBottom = bottom
+
+        // The row span already brackets the photo tightly. Search the FULL row
+        // range for the true top/bottom edges rather than pre-cropping a fixed
+        // fraction first: an up-front inset became a hard cap the refinement
+        // could never grow back out of, which cut ~1/6 off every cell's top.
+        // The modest inset survives only as a fallback when refinement fails.
+        let slotInsetY = max(2, yRange.count / 18)
+        var top = min(yRange.upperBound, yRange.lowerBound + slotInsetY)
+        var bottom = max(yRange.lowerBound, yRange.upperBound - slotInsetY)
         if let refinedY = contactSheetSubjectYRange(
             luminances: luminances,
             width: width,
             xRange: left...right,
-            yRange: top...bottom
-        ), Double(refinedY.count) >= Double(max(1, fallbackBottom - fallbackTop + 1)) * 0.72 {
+            yRange: yRange
+        ), Double(refinedY.count) >= Double(max(1, yRange.count)) * 0.45 {
             top = refinedY.lowerBound
             bottom = refinedY.upperBound
         }

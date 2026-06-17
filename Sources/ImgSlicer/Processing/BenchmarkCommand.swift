@@ -13,11 +13,12 @@ struct BenchmarkCommand: Sendable {
     let folderURL: URL
     let settings: CropSettings
     let passThreshold: Double
+    let useSamples: Bool
 
     static func parse(arguments: [String]) -> BenchmarkCommand? {
         guard let commandIndex = arguments.firstIndex(of: "--benchmark") else { return nil }
         guard arguments.indices.contains(commandIndex + 1) else {
-            print("Usage: ImgSlicer --benchmark <image-folder> [--profile filmScan|gridPhoto|balanced] [--threshold 0.85]")
+            print("Usage: ImgSlicer --benchmark <image-folder> [--profile filmScan|gridPhoto|balanced] [--threshold 0.85] [--use-samples]")
             return nil
         }
 
@@ -38,7 +39,8 @@ struct BenchmarkCommand: Sendable {
         return BenchmarkCommand(
             folderURL: URL(fileURLWithPath: arguments[commandIndex + 1]).standardizedFileURL,
             settings: settings,
-            passThreshold: threshold
+            passThreshold: threshold,
+            useSamples: arguments.contains("--use-samples")
         )
     }
 
@@ -51,11 +53,14 @@ struct BenchmarkCommand: Sendable {
 
         let processor = ImageProcessor()
         let imageFiles = AlgorithmComparisonCommand.imageFiles(in: folderURL)
+        // Mirror the app: load the same sample library the UI feeds into
+        // detection so the benchmark measures what the user actually sees.
+        let sampleProfiles = useSamples ? SampleLibrary().load(rootURL: folderURL) : []
 
         var rows: [Row] = []
         for url in imageFiles {
             guard let truth = labels[url.lastPathComponent], !truth.isEmpty else { continue }
-            let detected = processor.detectCropRegions(for: url, settings: settings).map { $0.rect }
+            let detected = processor.detectCropRegions(for: url, settings: settings, sampleProfiles: sampleProfiles).map { $0.rect }
             rows.append(Row(name: url.lastPathComponent, truth: truth, detected: detected, threshold: passThreshold))
         }
 
@@ -76,12 +81,15 @@ struct BenchmarkCommand: Sendable {
         print("")
         print("- Folder: \(folderURL.path)")
         print("- Profile: \(settings.businessProfile.rawValue)")
+        print("- Samples: \(useSamples ? "on (.imgslicer-samples.json)" : "off")")
         print("- Labeled images: \(rows.count)")
         print("- Pass threshold (mean IoU, count must match): \(String(format: "%.2f", passThreshold))")
         print("- Passing: \(passes)/\(rows.count)")
         print("- Count match: \(countMatches)/\(rows.count)")
         print("- Overall mean IoU: \(String(format: "%.3f", meanIoU))")
         print("")
+
+        reportEdgeErrors(rows: rows)
         print("| Image | GT | Det | mean IoU | min IoU | status |")
         print("| --- | ---: | ---: | ---: | ---: | --- |")
         for row in rows.sorted(by: { $0.meanIoU < $1.meanIoU }) {
@@ -96,6 +104,40 @@ struct BenchmarkCommand: Sendable {
                 print("- \(row.name): \(row.status), mean IoU \(String(format: "%.3f", row.meanIoU)) (GT \(row.truth.count) vs detected \(row.detected.count))")
             }
         }
+    }
+
+    /// Per-edge signed error across all matched (ground-truth, detected) box
+    /// pairs, in units of normalized image size (× the perpendicular box size
+    /// is also shown so the bias is readable relative to a cell).
+    ///
+    /// Sign convention — positive means the detected edge sits *inside* the
+    /// truth (the box is too tight on that side); negative means it overshoots
+    /// (too loose). This tells us the DIRECTION of the boundary error, which
+    /// IoU alone hides: an all-tight box and an all-loose box score the same.
+    private func reportEdgeErrors(rows: [Row]) {
+        let pairs = rows.flatMap(\.matchedPairs)
+        guard !pairs.isEmpty else { return }
+
+        func stats(_ values: [Double]) -> (mean: Double, absMean: Double) {
+            (values.average, values.map(abs).average)
+        }
+        // Inward-positive: left/top use (det - truth); right/bottom use (truth - det).
+        let left = stats(pairs.map { ($0.det.minX - $0.gt.minX) / $0.gt.width })
+        let right = stats(pairs.map { ($0.gt.maxX - $0.det.maxX) / $0.gt.width })
+        let top = stats(pairs.map { ($0.det.minY - $0.gt.minY) / $0.gt.height })
+        let bottom = stats(pairs.map { ($0.gt.maxY - $0.det.maxY) / $0.gt.height })
+
+        print("## Edge error (matched pairs: \(pairs.count); +inward/too-tight, −outward/too-loose; % of box side)")
+        print("")
+        print("| Edge | mean signed | mean abs |")
+        print("| --- | ---: | ---: |")
+        func pct(_ v: Double) -> String { String(format: "%+.1f%%", v * 100) }
+        func apct(_ v: Double) -> String { String(format: "%.1f%%", v * 100) }
+        print("| left | \(pct(left.mean)) | \(apct(left.absMean)) |")
+        print("| right | \(pct(right.mean)) | \(apct(right.absMean)) |")
+        print("| top | \(pct(top.mean)) | \(apct(top.absMean)) |")
+        print("| bottom | \(pct(bottom.mean)) | \(apct(bottom.absMean)) |")
+        print("")
     }
 
     private func loadLabels() -> [String: [CGRect]]? {
@@ -120,11 +162,17 @@ struct BenchmarkCommand: Sendable {
         return labels
     }
 
+    struct MatchedPair {
+        let gt: CGRect
+        let det: CGRect
+    }
+
     private struct Row {
         let name: String
         let truth: [CGRect]
         let detected: [CGRect]
         let ious: [Double]
+        let matchedPairs: [MatchedPair]
         let passed: Bool
         let status: String
 
@@ -132,7 +180,11 @@ struct BenchmarkCommand: Sendable {
             self.name = name
             self.truth = truth
             self.detected = detected
-            self.ious = Self.match(truth: truth, detected: detected)
+            let matches = Self.match(truth: truth, detected: detected)
+            self.ious = matches.map(\.iou)
+            self.matchedPairs = matches.compactMap { match in
+                match.detected.map { MatchedPair(gt: match.gt, det: $0) }
+            }
             let mean = ious.average
             let countMatch = truth.count == detected.count
             self.passed = countMatch && mean >= threshold
@@ -148,21 +200,27 @@ struct BenchmarkCommand: Sendable {
         var meanIoU: Double { ious.average }
         var minIoU: Double { ious.min() ?? 0 }
 
+        struct Match {
+            let gt: CGRect
+            let detected: CGRect?
+            let iou: Double
+        }
+
         /// Greedy IoU match: each ground-truth box takes its best unused
-        /// detected box. Missing detections count as IoU 0.
-        static func match(truth: [CGRect], detected: [CGRect]) -> [Double] {
+        /// detected box. Missing detections count as IoU 0 (no paired box).
+        static func match(truth: [CGRect], detected: [CGRect]) -> [Match] {
             guard !truth.isEmpty else { return [] }
             var available = Array(detected.indices)
-            var result: [Double] = []
+            var result: [Match] = []
             for gt in truth {
                 let best = available
                     .map { (index: $0, iou: iou(gt, detected[$0])) }
                     .max { $0.iou < $1.iou }
                 if let best, best.iou > 0 {
                     available.removeAll { $0 == best.index }
-                    result.append(best.iou)
+                    result.append(Match(gt: gt, detected: detected[best.index], iou: best.iou))
                 } else {
-                    result.append(0)
+                    result.append(Match(gt: gt, detected: nil, iou: 0))
                 }
             }
             return result
