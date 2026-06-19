@@ -947,6 +947,148 @@ struct ImageProcessor: Sendable {
         return mergeFalseProjectionSplits(gray: gray, width: width, height: height, boxes: boxes)
     }
 
+    /// Render the original image to a full-resolution grayscale buffer for the
+    /// final boundary snap. Capped at ~5000px on the long side so the scan stays
+    /// crisp without unbounded memory. nil on failure (snap skipped).
+    private func fullResolutionGray(cgImage: CGImage) -> (bytes: [UInt8], width: Int, height: Int)? {
+        let cap = 5000
+        let longSide = max(cgImage.width, cgImage.height)
+        let scale = longSide > cap ? Double(cap) / Double(longSide) : 1.0
+        let width = max(1, Int(Double(cgImage.width) * scale))
+        let height = max(1, Int(Double(cgImage.height) * scale))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: width * 4,
+            bitsPerPixel: 32
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext else {
+            return nil
+        }
+        context.interpolationQuality = .none
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return (grayscaleBytes(bitmap: bitmap, width: width, height: height), width, height)
+    }
+
+    // Shadow-lift LUT (gamma 0.45): expands dark tones so the texture of dark
+    // *content* (shaded wood, deep shadow) becomes visible, while a flat black
+    // gutter stays flat. This is a detection-only transform — output crops use
+    // the original pixels — exactly the "temporarily brighten to recognise"
+    // idea, applied to the analysis buffer.
+    private static let shadowLiftLUT: [Double] = (0..<256).map { pow(Double($0) / 255.0, 0.45) * 255.0 }
+
+    /// Snap each frame's left/right edge to the true gutter↔content transition.
+    ///
+    /// The split step (run at ~600px) can't tell a thin black gutter from dark
+    /// textured content, so an edge may keep the gutter (too loose) or sit
+    /// inside the subject (too tight). Working at full resolution and on
+    /// shadow-lifted values, every column is classed as flat *gutter* (dark and
+    /// textureless) or *content* (textured). The edge is then moved either
+    /// inward — off a gutter onto the first content — or outward — back across
+    /// dark-but-textured content until the real gutter — so both failure
+    /// directions converge on the same boundary.
+    private func snapVerticalBoundaries(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard width > 8, height > 8, gray.count >= width * height else { return regions }
+        let lut = ImageProcessor.shadowLiftLUT
+        let textureMin = 22.0   // lifted std above this = photographic content
+        let darkMax = 70.0      // raw mean below this (and flat) = film gutter
+
+        // Search radius is based on the MEDIAN frame width, not each box's own
+        // width: a frame that was badly cut is anomalously narrow, so its own
+        // width would shrink the window below the distance to the real gutter.
+        let widths = regions.map { $0.rect.normalized.width * Double(width) }.sorted()
+        let medianWidth = widths.isEmpty ? Double(width) : widths[widths.count / 2]
+        let cap = max(1, Int(medianWidth * 0.30))
+
+        let rawFlatMax = 12.0   // raw std below this = flat (grain only), not texture
+        func classify(_ x: Int, _ yRange: Range<Int>) -> (content: Bool, gutter: Bool) {
+            var sum = 0.0, sumSq = 0.0, rawSum = 0.0, rawSumSq = 0.0
+            for y in yRange {
+                let raw = gray[y * width + x]
+                sum += lut[Int(raw)]; sumSq += lut[Int(raw)] * lut[Int(raw)]
+                rawSum += Double(raw); rawSumSq += Double(raw) * Double(raw)
+            }
+            let n = Double(yRange.count)
+            let liftedStd = (sumSq / n - (sum / n) * (sum / n)).squareRoot()
+            let rawMean = rawSum / n
+            let rawStd = (rawSumSq / n - rawMean * rawMean).squareRoot()
+            // A gutter is dark AND flat in RAW terms (grain only). Keying the
+            // gutter on raw std stops the shadow lift from amplifying gutter
+            // grain into false "texture" that would let an edge run past it.
+            let gutter = rawMean <= darkMax && rawStd <= rawFlatMax
+            let content = !gutter && liftedStd >= textureMin
+            return (content, gutter)
+        }
+
+        return regions.map { region in
+            let rect = region.rect.normalized
+            let minX = max(0, min(width - 1, Int(floor(rect.minX * Double(width)))))
+            let maxX = max(minX + 1, min(width, Int(ceil(rect.maxX * Double(width)))))
+            let minY = max(0, min(height - 1, Int(floor(rect.minY * Double(height)))))
+            let maxY = max(minY + 1, min(height, Int(ceil(rect.maxY * Double(height)))))
+            let boxW = maxX - minX, boxH = maxY - minY
+            guard boxW > 24, boxH > 24 else { return region }
+            let inset = boxH / 10
+            let yRange = (minY + inset)..<(maxY - inset)
+            guard !yRange.isEmpty else { return region }
+
+            // Precompute gutter/content for the search windows around each edge.
+            var cls: [Int: (content: Bool, gutter: Bool)] = [:]
+            func c(_ x: Int) -> (content: Bool, gutter: Bool) {
+                if let v = cls[x] { return v }
+                let v = classify(x, yRange); cls[x] = v; return v
+            }
+
+            // A real inter-frame gutter is a solid black band several pixels
+            // wide; a 1–2px "gutter" dip inside dark content (shaded wood) is
+            // not. Require a gutter run of at least this many columns next to a
+            // transition, so the snap locks onto the true frame boundary rather
+            // than a speck of shadow.
+            let minGutterRun = max(3, Int(medianWidth * 0.006))
+            func gutterRunLeftOf(_ x: Int) -> Bool {
+                guard x - minGutterRun >= 0 else { return false }
+                for k in 1...minGutterRun where !c(x - k).gutter { return false }
+                return true
+            }
+            func gutterRunRightOf(_ x: Int) -> Bool {
+                guard x + minGutterRun < width else { return false }
+                for k in 1...minGutterRun where !c(x + k).gutter { return false }
+                return true
+            }
+
+            // LEFT edge → gutter→content transition (content backed by a real
+            // gutter run) nearest minX.
+            var left = minX
+            var bestL: Int? = nil
+            for x in max(1, minX - cap)...min(width - 1, minX + cap) where c(x).content && gutterRunLeftOf(x) {
+                if bestL == nil || abs(x - minX) < abs(bestL! - minX) { bestL = x }
+            }
+            if let b = bestL { left = b }
+
+            // RIGHT edge → content→gutter transition nearest maxX-1.
+            var right = maxX - 1
+            var bestR: Int? = nil
+            for x in max(1, (maxX - 1) - cap)...min(width - 2, (maxX - 1) + cap) where c(x).content && gutterRunRightOf(x) {
+                if bestR == nil || abs(x - (maxX - 1)) < abs(bestR! - (maxX - 1)) { bestR = x }
+            }
+            if let b = bestR { right = b }
+
+            guard left + 12 < right else { return region }
+            let snapped = CGRect(
+                x: Double(left) / Double(width),
+                y: rect.minY,
+                width: Double(right + 1 - left) / Double(width),
+                height: rect.height
+            ).normalized
+            return CropRegion(index: region.index, rect: snapped, isManual: region.isManual)
+        }
+    }
+
     private func grayscaleBytes(bitmap: NSBitmapImageRep, width: Int, height: Int) -> [UInt8] {
         if let data = bitmap.bitmapData {
             let samples = max(1, bitmap.samplesPerPixel)
