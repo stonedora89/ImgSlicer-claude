@@ -57,14 +57,6 @@ enum CropAlgorithmMode: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
-enum RecognitionStrength: String, CaseIterable, Identifiable, Sendable {
-    case conservative = "保守"
-    case standard = "标准"
-    case aggressive = "激进"
-
-    var id: String { rawValue }
-}
-
 struct PhotoItem: Identifiable, Hashable, Sendable {
     let id = UUID()
     let url: URL
@@ -143,7 +135,6 @@ struct ImportSummary: Sendable {
 
 struct CropSettings: Sendable {
     var businessProfile: CropBusinessProfile = .filmScan
-    var recognitionStrength: RecognitionStrength = .standard
     var preprocessMode: ImagePreprocessMode = .original
     var algorithmMode: CropAlgorithmMode = .automatic
     var orientation: OrientationMode = .automatic

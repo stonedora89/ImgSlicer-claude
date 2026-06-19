@@ -192,6 +192,28 @@ struct ImageProcessor: Sendable {
         candidates = sampleGuidedCandidates(candidates, sampleProfiles: sampleProfiles)
         candidates = rankedCandidates(candidates, limit: performance.maxCandidateCount)
 
+        // Snap each frame's vertical edges to the true gutter↔content boundary
+        // at full resolution. The ~600px split confuses a thin black gutter
+        // with dark textured content, so left edges either keep the gutter or
+        // cut into the subject; the snap fixes both directions.
+        if let fullGray = fullResolutionGray(cgImage: cgImage) {
+            candidates = candidates.map { candidate in
+                let snapped = snapVerticalBoundaries(
+                    regions: candidate.regions,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                return CropCandidate(
+                    title: candidate.title,
+                    detail: candidate.detail,
+                    regions: snapped.enumerated().map { CropRegion(index: $0.offset + 1, rect: $0.element.rect.normalized, isManual: $0.element.isManual) },
+                    marginScale: candidate.marginScale,
+                    score: candidate.score
+                )
+            }
+        }
+
         if candidates.isEmpty, !bestFallback.isEmpty {
             candidates.append(CropCandidate(
                 title: "单图裁切",

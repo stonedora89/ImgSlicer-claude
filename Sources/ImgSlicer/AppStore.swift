@@ -38,12 +38,6 @@ final class AppStore: ObservableObject {
         return task.photos.first
     }
 
-    var canApplyCurrentCropToFolder: Bool {
-        guard let task = selectedTask,
-              let photo = selectedPhoto else { return false }
-        return task.photos.count > 1 && !photo.cropRegions.isEmpty
-    }
-
     var canRetileSelectedPhotoFromTemplate: Bool {
         guard let photo = selectedPhoto else { return false }
         return photo.cropRegions.contains { $0.rect.width > 0.02 && $0.rect.height > 0.02 }
@@ -122,12 +116,15 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Clears every task except those currently being processed — a running
+    /// task can't be removed because the queue is actively writing to it.
     func clearFinishedAndIdle() {
-        tasks.removeAll { task in
-            task.status == .done || (task.status == .waiting && task.processedCount == 0)
+        tasks.removeAll { $0.status != .running }
+        if selectedTask?.status != .running {
+            selectedTaskID = tasks.first?.id
+            selectedPhotoID = tasks.first?.photos.first?.id
+            selectedCropRegionID = nil
         }
-        selectedTaskID = tasks.first?.id
-        selectedPhotoID = tasks.first?.photos.first?.id
     }
 
     func openFolder(for taskID: FolderTask.ID) {
@@ -316,72 +313,6 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func applyCurrentCropToSelectedFolder() {
-        guard let indexes = selectedIndexes(),
-              !tasks[indexes.task].photos[indexes.photo].cropRegions.isEmpty,
-              let template = selectedTemplateRegion(taskIndex: indexes.task, photoIndex: indexes.photo)?.rect.normalizedCropRect else { return }
-
-        // Use the adjusted sample as a SIZE reference: re-detect every other
-        // image on its own, then calibrate each detected box's edges by the
-        // sample's offset. This fits the per-image content while matching the
-        // sample's framing — instead of copying the sample's box layout/count
-        // verbatim onto images it does not fit.
-        let taskIndex = indexes.task
-        let taskID = tasks[taskIndex].id
-        let sourceID = tasks[taskIndex].photos[indexes.photo].id
-        let currentSettings = settings
-        let sampleProfiles = sampleLibrary.load(rootURL: tasks[taskIndex].rootURL)
-
-        let targets: [(id: PhotoItem.ID, url: URL)] = tasks[taskIndex].photos.compactMap { photo in
-            (photo.id == sourceID || photo.isManual) ? nil : (id: photo.id, url: photo.url)
-        }
-        guard !targets.isEmpty else {
-            logMessage = "没有需要校准的图片（其它图片都已手动调整）。"
-            return
-        }
-
-        let targetIDs = Set(targets.map(\.id))
-        for photoIndex in tasks[taskIndex].photos.indices where targetIDs.contains(tasks[taskIndex].photos[photoIndex].id) {
-            tasks[taskIndex].photos[photoIndex].status = .locating
-        }
-        tasks[taskIndex].detail = "正在按样图尺寸校准整个文件夹"
-        logMessage = "正在按样图框尺寸重新识别文件夹内 \(targets.count) 张图片。"
-        logSubMessage = "每张图各自识别，再按样图边缘统一校准尺寸。"
-
-        Task { [weak self, processor, currentSettings, sampleProfiles, targets, template, taskID] in
-            for target in targets {
-                let detected = await Task.detached {
-                    processor.detectCropCandidates(for: target.url, settings: currentSettings, sampleProfiles: sampleProfiles).first?.regions ?? []
-                }.value
-                self?.applyFolderTemplate(detectedRegions: detected, template: template, taskID: taskID, photoID: target.id)
-            }
-            self?.finishFolderTemplateApply(taskID: taskID, count: targets.count)
-        }
-    }
-
-    private func applyFolderTemplate(detectedRegions: [CropRegion], template: CGRect, taskID: FolderTask.ID, photoID: PhotoItem.ID) {
-        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }),
-              let photoIndex = tasks[taskIndex].photos.firstIndex(where: { $0.id == photoID }) else { return }
-
-        let regions = detectedRegions.count > 1
-            ? relativeTemplateRegions(from: detectedRegions, template: template)
-            : tiledRegions(anchor: template)
-        tasks[taskIndex].photos[photoIndex].cropRegions = regions
-        tasks[taskIndex].photos[photoIndex].isManual = true
-        tasks[taskIndex].photos[photoIndex].status = .manual
-        tasks[taskIndex].photos[photoIndex].selectedCandidateID = nil
-        editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
-    }
-
-    private func finishFolderTemplateApply(taskID: FolderTask.ID, count: Int) {
-        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }) else { return }
-        tasks[taskIndex].status = .needsReview
-        tasks[taskIndex].detail = "已按样图尺寸校准整个文件夹"
-        editStore.save(photos: tasks[taskIndex].photos, in: tasks[taskIndex])
-        logMessage = "已按样图尺寸重新识别并校准 \(count) 张图片。"
-        logSubMessage = "每张图各自识别后按样图边缘统一校准，可继续微调。"
-    }
-
     func retileSelectedPhotoFromTemplate() {
         guard let indexes = selectedIndexes(),
               let template = selectedTemplateRegion(taskIndex: indexes.task, photoIndex: indexes.photo)?.rect.normalizedCropRect else { return }
@@ -440,6 +371,12 @@ final class AppStore: ObservableObject {
     }
 
     private func runLocator(taskIndexes: [Int], priorityTaskIndex: Int?, priorityPhotoIndex: Int?) async {
+        // Debounce: while the user keeps stepping through photos each selection
+        // cancels and reschedules us, so a short wait lets rapid navigation skip
+        // the heavy pre-detection until they pause on a photo.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        if Task.isCancelled { return }
+
         let validIndexes = taskIndexes.filter { tasks.indices.contains($0) }
         guard !validIndexes.isEmpty else { return }
 
@@ -550,15 +487,18 @@ final class AppStore: ObservableObject {
                 return (index, task, sampleLibrary.load(rootURL: task.rootURL))
             }
 
-            await withTaskGroup(of: (Int, [PhotoProcessResult]).self) { group in
-                for (index, task, sampleProfiles) in jobs {
+            await withTaskGroup(of: (FolderTask.ID, [PhotoProcessResult]).self) { group in
+                for (_, task, sampleProfiles) in jobs {
                     group.addTask { [processor, currentSettings, sampleProfiles] in
-                        (index, await processor.process(task: task, settings: currentSettings, sampleProfiles: sampleProfiles))
+                        (task.id, await processor.process(task: task, settings: currentSettings, sampleProfiles: sampleProfiles))
                     }
                 }
 
-                for await (index, results) in group {
+                // Resolve the task by id on each write-back: the user may have
+                // cleared other (non-running) tasks meanwhile, shifting indices.
+                for await (taskID, results) in group {
                     for result in results {
+                        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { continue }
                         updateTaskFromProcessor(
                             taskIndex: index,
                             photoURL: result.photoURL,
@@ -568,7 +508,7 @@ final class AppStore: ObservableObject {
                             failed: result.failed
                         )
                     }
-                    if tasks.indices.contains(index) {
+                    if let index = tasks.firstIndex(where: { $0.id == taskID }) {
                         tasks[index].status = tasks[index].photos.contains(where: { $0.status == .failed }) ? .needsReview : .done
                         tasks[index].detail = tasks[index].status == .done ? "已输出完成" : "部分图片需人工确认"
                     }

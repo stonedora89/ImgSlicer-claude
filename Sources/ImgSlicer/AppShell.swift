@@ -154,7 +154,7 @@ struct QueuePanel: View {
                     Image(systemName: "eraser")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("清理已完成与未开始任务")
+                .help("清理所有任务（处理中的除外）")
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
@@ -226,12 +226,22 @@ struct FolderTaskRow: View {
                 .controlSize(.small)
         }
         .padding(12)
-        .background(active ? Color(red: 0.125, green: 0.145, blue: 0.176) : Color(red: 0.115, green: 0.13, blue: 0.155))
+        .background(active ? AppTheme.orange.opacity(0.16) : Color(red: 0.115, green: 0.13, blue: 0.155))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(alignment: .leading) {
+            if active {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(AppTheme.orange)
+                    .frame(width: 4)
+                    .padding(.vertical, 10)
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 14)
-                .stroke(active ? AppTheme.blue.opacity(0.32) : Color.white.opacity(0.05))
+                .stroke(active ? AppTheme.orange : Color.white.opacity(0.05), lineWidth: active ? 2 : 1)
         }
+        .shadow(color: active ? AppTheme.orange.opacity(0.35) : .clear, radius: 6)
+        .animation(.easeOut(duration: 0.15), value: active)
     }
 }
 
@@ -265,19 +275,26 @@ struct PreviewWorkspace: View {
         GeometryReader { proxy in
             ZStack {
                 GridBackground()
-                if let photo = store.selectedPhoto, let image = NSImage(contentsOf: photo.url) {
-                    PhotoCanvas(
-                        image: image,
-                        regions: photo.cropRegions,
-                        selectedRegionID: store.selectedCropRegionID,
-                        onDelete: { regionID in
-                            store.deleteSelectedCrop(regionID: regionID)
-                        },
-                        onSelect: { regionID in
-                            store.selectCropRegion(regionID)
-                        }
-                    ) { regionID, rect in
-                        store.updateSelectedCrop(regionID: regionID, rect: rect)
+                if let photo = store.selectedPhoto {
+                    DownsampledImageView(url: photo.url, maxPixel: 2200) {
+                        ProgressView()
+                            .controlSize(.large)
+                    } content: { image in
+                        AnyView(
+                            PhotoCanvas(
+                                image: image,
+                                regions: photo.cropRegions,
+                                selectedRegionID: store.selectedCropRegionID,
+                                onDelete: { regionID in
+                                    store.deleteSelectedCrop(regionID: regionID)
+                                },
+                                onSelect: { regionID in
+                                    store.selectCropRegion(regionID)
+                                }
+                            ) { regionID, rect in
+                                store.updateSelectedCrop(regionID: regionID, rect: rect)
+                            }
+                        )
                     }
                     .padding(.horizontal, 68)
                     .padding(.vertical, 82)
@@ -321,6 +338,19 @@ struct PreviewWorkspace: View {
         .background(AppTheme.viewer)
         .clipShape(RoundedRectangle(cornerRadius: 22))
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.05)))
+        .onChange(of: store.selectedPhoto?.id) { _, _ in
+            DownsampledImageLoader.prefetch(neighborURLs(), maxPixel: 2200)
+        }
+    }
+
+    /// URLs of the photos immediately before/after the selection, so left/right
+    /// navigation shows the preview from cache without a decode wait.
+    private func neighborURLs() -> [URL] {
+        guard let photos = store.selectedTask?.photos,
+              let index = photos.firstIndex(where: { $0.id == store.selectedPhoto?.id }) else { return [] }
+        return [index - 1, index + 1]
+            .filter { photos.indices.contains($0) }
+            .map { photos[$0].url }
     }
 }
 
@@ -384,6 +414,9 @@ struct MultiCropOverlay: View {
                 }) { rect in
                     onChange(region.id, rect)
                 }
+                // Selected box floats above its neighbours so overlapping frames
+                // never steal the drag — you always manipulate the one you picked.
+                .zIndex(region.id == selectedRegionID ? 1 : 0)
             }
         }
     }
@@ -408,8 +441,12 @@ struct CropOverlay: View {
             )
 
             ZStack(alignment: .topLeading) {
+                // Full-canvas spacer only — must not capture hits, otherwise the
+                // top-most frame's transparent fill would swallow drags meant for
+                // a box underneath it.
                 Rectangle()
                     .fill(Color.clear)
+                    .allowsHitTesting(false)
                 Rectangle()
                     .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
                     .background(Rectangle().fill(Color.black.opacity(0.001)))
@@ -576,15 +613,6 @@ struct ParameterPanel: View {
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.blue))
                     .disabled(store.selectedPhoto == nil)
                     .help("智能重识别：有选中参考框时按实例重识别当前画布，否则重新生成自动候选效果")
-
-                    Button {
-                        store.applyCurrentCropToSelectedFolder()
-                    } label: {
-                        Image(systemName: "rectangle.stack")
-                    }
-                    .buttonStyle(AccentIconButtonStyle(color: AppTheme.green))
-                    .disabled(!store.canApplyCurrentCropToFolder)
-                    .help("以当前图片为样图：按它的框尺寸，对文件夹内其它未手动调整的图片各自重新识别并校准")
                 }
             }
             .padding(16)
@@ -761,10 +789,11 @@ struct Filmstrip: View {
 
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
+                        LazyHStack(spacing: 10) {
                             ForEach(store.selectedTask?.photos ?? []) { photo in
                                 FilmFrame(photo: photo, active: photo.id == store.selectedPhoto?.id)
                                     .id(photo.id)
+                                    .contentShape(Rectangle())
                                     .onTapGesture { store.selectPhoto(photo.id) }
                             }
                         }
@@ -815,12 +844,16 @@ struct FilmFrame: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             ZStack(alignment: .topTrailing) {
-                if let image = NSImage(contentsOf: photo.url) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
+                DownsampledImageView(url: photo.url, maxPixel: 144) {
                     Color(red: 0.22, green: 0.18, blue: 0.14)
+                } content: { image in
+                    AnyView(
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.low)
+                            .antialiased(false)
+                            .scaledToFill()
+                    )
                 }
                 Circle().fill(statusColor).frame(width: 8, height: 8).padding(5)
             }
@@ -837,9 +870,14 @@ struct FilmFrame: View {
         }
         .padding(6)
         .frame(width: 124, height: 78)
-        .background(Color(red: 0.115, green: 0.13, blue: 0.16))
+        .background(active ? AppTheme.orange.opacity(0.18) : Color(red: 0.115, green: 0.13, blue: 0.16))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(active ? AppTheme.blue.opacity(0.45) : Color.white.opacity(0.05)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(active ? AppTheme.orange : Color.white.opacity(0.05), lineWidth: active ? 2.5 : 1)
+        )
+        .shadow(color: active ? AppTheme.orange.opacity(0.5) : .clear, radius: 7)
+        .animation(.easeOut(duration: 0.15), value: active)
     }
 
     private var statusColor: Color {
@@ -907,35 +945,6 @@ struct SettingsGroup<Content: View>: View {
         .background(Color.white.opacity(0.025))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.05)))
-    }
-}
-
-struct LabeledPicker<Selection: Hashable, Content: View>: View {
-    let title: String
-    @Binding var selection: Selection
-    let content: Content
-
-    init(title: String, selection: Binding<Selection>, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self._selection = selection
-        self.content = content()
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 11))
-                .foregroundStyle(AppTheme.muted)
-                .frame(width: 48, alignment: .leading)
-            Picker("", selection: $selection) {
-                content
-            }
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-        }
-        .padding(10)
-        .background(Color.black.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
