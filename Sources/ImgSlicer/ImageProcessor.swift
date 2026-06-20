@@ -214,6 +214,22 @@ struct ImageProcessor: Sendable {
             }
         }
 
+        // Regularize the strip grid: a roll's frames share one pitch and width,
+        // so a frame that breaks the rhythm (one the snap couldn't fix because
+        // its gutter was missing/weak) is pulled back onto the regular grid the
+        // other frames define. Pure geometry, gated to strip-like layouts.
+        candidates = candidates.map { candidate in
+            let regular = regularizeStripGrid(candidate.regions)
+            guard regular.count == candidate.regions.count else { return candidate }
+            return CropCandidate(
+                title: candidate.title,
+                detail: candidate.detail,
+                regions: regular,
+                marginScale: candidate.marginScale,
+                score: candidate.score
+            )
+        }
+
         if candidates.isEmpty, !bestFallback.isEmpty {
             candidates.append(CropCandidate(
                 title: "单图裁切",
@@ -992,6 +1008,66 @@ struct ImageProcessor: Sendable {
     /// inward — off a gutter onto the first content — or outward — back across
     /// dark-but-textured content until the real gutter — so both failure
     /// directions converge on the same boundary.
+    /// Pull frames that break a film strip's regular rhythm back onto the grid.
+    ///
+    /// A roll's frames share one pitch (left-edge to left-edge) and one width,
+    /// so the consistent majority of frames defines a grid; an outlier — a frame
+    /// whose width or position deviates (because the split mis-cut it and the
+    /// edge snap had no clean gutter to lock onto) — is replaced by its grid
+    /// prediction. Conservative: it only fires on a clearly single-row strip
+    /// where most frames already agree, and only moves the outliers.
+    private func regularizeStripGrid(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 3 else { return regions }
+        let sorted = regions.enumerated().sorted { $0.element.rect.normalized.midX < $1.element.rect.normalized.midX }
+        let rects = sorted.map { $0.element.rect.normalized }
+
+        // Single-row gate: similar heights and vertical centres in a tight band.
+        let heights = rects.map { Double($0.height) }
+        guard let hMin = heights.min(), let hMax = heights.max(), hMin > 0, hMax / hMin < 1.4 else { return regions }
+        let centreYs = rects.map { Double($0.midY) }
+        let meanY = centreYs.reduce(0, +) / Double(centreYs.count)
+        let stdY = (centreYs.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centreYs.count)).squareRoot()
+        let medianH = heights.sorted()[heights.count / 2]
+        guard stdY < medianH * 0.15 else { return regions }   // a grid (multi-row) would spread Y
+
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+        let widths = rects.map { Double($0.width) }
+        let centres = rects.map { Double($0.midX) }
+        let medianW = median(widths)
+        guard medianW > 0 else { return regions }
+
+        // Pitch from consecutive centre gaps; anchor from the median residual.
+        let gaps = zip(centres.dropFirst(), centres).map { $0 - $1 }
+        guard !gaps.isEmpty else { return regions }
+        let pitch = median(gaps)
+        guard pitch > medianW * 0.5 else { return regions }
+        let residuals = centres.enumerated().map { $0.element - Double($0.offset) * pitch }
+        let anchor = median(residuals)
+        func predictedCentre(_ i: Int) -> Double { anchor + Double(i) * pitch }
+
+        // Need a consistent majority before trusting the grid.
+        let consistent = (0..<rects.count).filter { i in
+            abs(centres[i] - predictedCentre(i)) <= pitch * 0.18 &&
+            widths[i] >= medianW * 0.85 && widths[i] <= medianW * 1.15
+        }
+        guard consistent.count >= max(3, (rects.count * 2 + 2) / 3) else { return regions }
+
+        // Rebuild, correcting only the outliers.
+        var output = regions
+        for (i, item) in sorted.enumerated() {
+            let isOutlier = abs(centres[i] - predictedCentre(i)) > pitch * 0.35 ||
+                widths[i] < medianW * 0.78 || widths[i] > medianW * 1.28
+            guard isOutlier else { continue }
+            let cx = predictedCentre(i)
+            let r = rects[i]
+            let newRect = CGRect(x: cx - medianW / 2, y: r.minY, width: medianW, height: r.height)
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard !newRect.isNull, newRect.width > 0.02 else { continue }
+            output[item.offset] = CropRegion(index: item.element.index, rect: newRect.normalized, isManual: item.element.isManual)
+        }
+        return output
+    }
+
     private func snapVerticalBoundaries(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
         guard width > 8, height > 8, gray.count >= width * height else { return regions }
         let lut = ImageProcessor.shadowLiftLUT
