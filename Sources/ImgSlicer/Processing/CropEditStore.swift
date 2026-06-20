@@ -50,7 +50,13 @@ struct CropEditStore: Sendable {
         guard let data = try? Data(contentsOf: url) else {
             return SavedCropEdits()
         }
-        return (try? JSONDecoder().decode(SavedCropEdits.self, from: data)) ?? SavedCropEdits()
+        // MUST match write()'s .iso8601 date strategy. With the default strategy
+        // the iso8601 string dates fail to decode, loadEdits silently returns
+        // empty, and every save then overwrites the file with only the current
+        // photo — wiping all other photos' edits (including manual GT).
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(SavedCropEdits.self, from: data)) ?? SavedCropEdits()
     }
 
     private func write(edits: SavedCropEdits, rootURL: URL) {
