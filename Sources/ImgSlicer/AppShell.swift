@@ -678,6 +678,7 @@ struct ViewerLog: View {
 
 struct ParameterPanel: View {
     @EnvironmentObject private var store: AppStore
+    @State private var showMargins = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -709,15 +710,12 @@ struct ParameterPanel: View {
 
             ScrollView {
                 VStack(spacing: 12) {
-                    SettingsGroup("识别模式") {
-                        AutoModeSummary()
-                    }
                     SettingsGroup("自动效果") {
                         VStack(spacing: 10) {
                             AutoCandidatePicker()
                         }
                     }
-                    SettingsGroup("边距设置") {
+                    CollapsibleGroup("高级 · 边距微调", isExpanded: $showMargins) {
                         VStack(spacing: 10) {
                             if let reference = store.recognitionMarginReference {
                                 RecognitionMarginReferenceView(reference: reference)
@@ -803,29 +801,46 @@ struct AutoCandidatePicker: View {
     }
 }
 
-struct AutoModeSummary: View {
+/// A SettingsGroup whose body collapses behind a tappable header — used to tuck
+/// rarely-needed advanced controls out of the default view.
+struct CollapsibleGroup<Content: View>: View {
+    let title: String
+    @Binding var isExpanded: Bool
+    let content: Content
+
+    init(_ title: String, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self._isExpanded = isExpanded
+        self.content = content()
+    }
+
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(AppTheme.blue)
-                .frame(width: 26, height: 26)
-                .background(AppTheme.blue.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("自动最佳")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AppTheme.text)
-                Text("自动组合胶片框、分隔线与主体检测")
-                    .font(.system(size: 10))
-                    .foregroundStyle(AppTheme.muted)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.86, green: 0.89, blue: 0.93))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(AppTheme.muted)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
             }
-            Spacer()
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                content
+            }
         }
-        .padding(10)
-        .background(Color.black.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(14)
+        .background(Color.white.opacity(0.025))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.05)))
     }
 }
 
