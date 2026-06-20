@@ -1125,16 +1125,25 @@ struct ImageProcessor: Sendable {
             // not. Require a gutter run of at least this many columns next to a
             // transition, so the snap locks onto the true frame boundary rather
             // than a speck of shadow.
+            // Require a real gutter run beside the transition, but tolerate a
+            // few anti-aliased columns between the solid black and the content:
+            // count gutter columns in a slightly wider span and demand at least
+            // minGutterRun of them. A 1–2px shadow speck still can't reach the
+            // count, while a gradual gutter→content edge (a dark subject right
+            // against the black band) is no longer missed and left in the frame.
             let minGutterRun = max(3, Int(medianWidth * 0.006))
+            let gutterSpan = minGutterRun + 3
             func gutterRunLeftOf(_ x: Int) -> Bool {
-                guard x - minGutterRun >= 0 else { return false }
-                for k in 1...minGutterRun where !c(x - k).gutter { return false }
-                return true
+                guard x - gutterSpan >= 0 else { return false }
+                var g = 0
+                for k in 1...gutterSpan where c(x - k).gutter { g += 1 }
+                return g >= minGutterRun
             }
             func gutterRunRightOf(_ x: Int) -> Bool {
-                guard x + minGutterRun < width else { return false }
-                for k in 1...minGutterRun where !c(x + k).gutter { return false }
-                return true
+                guard x + gutterSpan < width else { return false }
+                var g = 0
+                for k in 1...gutterSpan where c(x + k).gutter { g += 1 }
+                return g >= minGutterRun
             }
 
             // LEFT edge → gutter→content transition (content backed by a real
