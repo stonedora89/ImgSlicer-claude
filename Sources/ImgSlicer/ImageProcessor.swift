@@ -214,21 +214,6 @@ struct ImageProcessor: Sendable {
             }
         }
 
-        // Consensus-template anchoring: frames on one strip share a width, so a
-        // frame with one trustworthy edge and one cut into a dark subject is
-        // rebuilt from the reliable edge plus the consensus width. Uses the
-        // per-edge reliability to decide which edge to trust.
-        candidates = candidates.map { candidate in
-            let anchored = anchorWidthToConsensus(regions: candidate.regions, cgImage: cgImage)
-            guard anchored.count == candidate.regions.count else { return candidate }
-            return CropCandidate(
-                title: candidate.title,
-                detail: candidate.detail,
-                regions: anchored,
-                marginScale: candidate.marginScale,
-                score: candidate.score
-            )
-        }
 
         // Regularize the strip grid: a roll's frames share one pitch and width,
         // so a frame that breaks the rhythm (one the snap couldn't fix because
@@ -1171,52 +1156,6 @@ struct ImageProcessor: Sendable {
                 horizontalEdge(at: minY, outsideTop: true),
                 horizontalEdge(at: maxY, outsideTop: false),
             ]
-        }
-    }
-
-    /// Rebuild a frame's horizontal extent from a reliable edge plus the strip's
-    /// consensus width, when its other edge was cut into a dark subject.
-    ///
-    /// The consensus width is the median width of frames whose BOTH edges are
-    /// trustworthy — a soft reference, not a straitjacket: a frame keeps its own
-    /// edges whenever they are reliable (real per-frame size variation is
-    /// preserved), and only a clearly-bad edge opposite a clearly-good one is
-    /// reconstructed (good edge ± consensus width). Conservative thresholds keep
-    /// borderline edges untouched. Only fires on a single-row strip with enough
-    /// fully-reliable frames to trust the consensus.
-    private func anchorWidthToConsensus(regions: [CropRegion], cgImage: CGImage) -> [CropRegion] {
-        guard regions.count >= 3 else { return regions }
-        let rel = edgeReliabilities(regions: regions, cgImage: cgImage)
-        guard rel.count == regions.count else { return regions }
-
-        let goodHi = 0.66, badLo = 0.34
-        // Consensus width from frames trustworthy on both sides.
-        let trustedWidths = regions.indices
-            .filter { rel[$0][0] >= goodHi && rel[$0][1] >= goodHi }
-            .map { Double(regions[$0].rect.normalized.width) }
-            .sorted()
-        guard trustedWidths.count >= max(3, regions.count / 2) else { return regions }
-        let consensusWidth = trustedWidths[trustedWidths.count / 2]
-        guard consensusWidth > 0.02 else { return regions }
-
-        return regions.map { region in
-            let r = region.rect.normalized
-            let i = regions.firstIndex { $0.id == region.id }
-            guard let idx = i else { return region }
-            let lRel = rel[idx][0], rRel = rel[idx][1]
-            var left = Double(r.minX), right = Double(r.maxX)
-            if lRel >= goodHi && rRel < badLo {
-                // Left trustworthy, right cut into subject → extend right.
-                right = min(1.0, left + consensusWidth)
-            } else if rRel >= goodHi && lRel < badLo {
-                // Right trustworthy, left cut → extend left.
-                left = max(0.0, right - consensusWidth)
-            } else {
-                return region   // both reliable, or both uncertain — leave alone
-            }
-            guard right - left > 0.02 else { return region }
-            let newRect = CGRect(x: left, y: r.minY, width: right - left, height: r.height).normalized
-            return CropRegion(index: region.index, rect: newRect, isManual: region.isManual)
         }
     }
 
