@@ -1175,18 +1175,37 @@ struct ImageProcessor: Sendable {
         }
         guard consistent.count >= max(3, (rects.count * 2 + 2) / 3) else { return regions }
 
-        // Rebuild, correcting only the outliers.
+        // The frames of a single row also share one top and one bottom edge, so
+        // a frame whose top/bottom broke from the row — e.g. a bright sky top
+        // that edge-trimming mistook for the film border and cut into — is
+        // snapped back to the row's consensus top/bottom.
+        let tops = rects.map { Double($0.minY) }
+        let bottoms = rects.map { Double($0.maxY) }
+        let medianTop = median(tops)
+        let medianBottom = median(bottoms)
+        let yTolerance = medianH * 0.08
+
+        // Rebuild, correcting only the outliers (X grid and Y row-edges).
         var output = regions
         for (i, item) in sorted.enumerated() {
-            let isOutlier = abs(centres[i] - predictedCentre(i)) > pitch * 0.35 ||
-                widths[i] < medianW * 0.78 || widths[i] > medianW * 1.28
-            guard isOutlier else { continue }
-            let cx = predictedCentre(i)
             let r = rects[i]
-            let newRect = CGRect(x: cx - medianW / 2, y: r.minY, width: medianW, height: r.height)
+            let xOutlier = abs(centres[i] - predictedCentre(i)) > pitch * 0.35 ||
+                widths[i] < medianW * 0.78 || widths[i] > medianW * 1.28
+            let newX = xOutlier ? predictedCentre(i) - medianW / 2 : Double(r.minX)
+            let newW = xOutlier ? medianW : Double(r.width)
+
+            var newTop = Double(r.minY)
+            var newBottom = Double(r.maxY)
+            if abs(newTop - medianTop) > yTolerance { newTop = medianTop }
+            if abs(newBottom - medianBottom) > yTolerance { newBottom = medianBottom }
+
+            let yChanged = newTop != Double(r.minY) || newBottom != Double(r.maxY)
+            guard xOutlier || yChanged else { continue }
+
+            let newRect = CGRect(x: newX, y: newTop, width: newW, height: newBottom - newTop)
                 .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-            guard !newRect.isNull, newRect.width > 0.02 else { continue }
-            output[item.offset] = CropRegion(index: item.element.index, rect: newRect.normalized, isManual: item.element.isManual)
+            guard !newRect.isNull, newRect.width > 0.02, newRect.height > 0.02 else { continue }
+            output[item.offset] = CropRegion(index: item.element.index, rect: newRect.normalized, angle: item.element.angle, isManual: item.element.isManual)
         }
         return output
     }
