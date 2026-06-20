@@ -596,7 +596,11 @@ struct CropOverlay: View {
     }
 
     private var activeColor: Color {
-        isSelected ? AppTheme.orange : AppTheme.blue
+        // Selected frame always gets the reserved highlight; others cycle the
+        // palette by frame number so adjacent boxes are visibly distinct.
+        guard !isSelected else { return AppTheme.orange }
+        let palette = AppTheme.frameColors
+        return palette[max(0, region.index - 1) % palette.count]
     }
 
     private func dragGesture(in size: CGSize, corner: CropCorner?) -> some Gesture {
@@ -1198,6 +1202,17 @@ enum AppTheme {
     static let blue = Color(red: 0.37, green: 0.53, blue: 0.72)
     static let green = Color(red: 0.31, green: 0.65, blue: 0.55)
     static let orange = Color(red: 0.9, green: 0.55, blue: 0.26)
+    /// Cycled across adjacent crop frames so neighbouring boxes never share a
+    /// colour — overlaps and mis-cuts stand out at a glance. Orange is reserved
+    /// for the selected frame, so it's deliberately excluded here.
+    static let frameColors: [Color] = [
+        Color(red: 0.37, green: 0.53, blue: 0.72),   // blue
+        Color(red: 0.31, green: 0.66, blue: 0.55),   // teal
+        Color(red: 0.74, green: 0.43, blue: 0.79),   // purple
+        Color(red: 0.86, green: 0.37, blue: 0.47),   // rose
+        Color(red: 0.36, green: 0.71, blue: 0.80),   // cyan
+        Color(red: 0.80, green: 0.73, blue: 0.33),   // yellow
+    ]
     static let line = Color.white.opacity(0.08)
     static let background = LinearGradient(colors: [Color(red: 0.125, green: 0.14, blue: 0.17), Color(red: 0.055, green: 0.063, blue: 0.075)], startPoint: .top, endPoint: .bottom)
     static let viewer = RadialGradient(colors: [Color(red: 0.105, green: 0.12, blue: 0.15), Color(red: 0.05, green: 0.055, blue: 0.07)], center: .top, startRadius: 0, endRadius: 760)
