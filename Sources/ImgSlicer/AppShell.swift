@@ -681,6 +681,19 @@ struct ParameterPanel: View {
     @State private var showMargins = false
 
     var body: some View {
+        content
+            .panelStyle()
+            .onChange(of: store.settings.top) { _, _ in store.reapplySelectedCandidateMargins() }
+            .onChange(of: store.settings.bottom) { _, _ in store.reapplySelectedCandidateMargins() }
+            .onChange(of: store.settings.left) { _, _ in store.reapplySelectedCandidateMargins() }
+            .onChange(of: store.settings.right) { _, _ in store.reapplySelectedCandidateMargins() }
+            .onChange(of: store.settings.businessProfile) { _, _ in store.redetectSelectedPhoto() }
+            .onChange(of: store.settings.preprocessMode) { _, _ in store.redetectSelectedPhoto() }
+            .onChange(of: store.settings.algorithmMode) { _, _ in store.redetectSelectedPhoto() }
+            .onChange(of: store.settings.orientation) { _, _ in store.redetectSelectedPhoto() }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("参数设置")
@@ -732,15 +745,6 @@ struct ParameterPanel: View {
                 .padding(14)
             }
         }
-        .panelStyle()
-        .onChange(of: store.settings.top) { _, _ in store.reapplySelectedCandidateMargins() }
-        .onChange(of: store.settings.bottom) { _, _ in store.reapplySelectedCandidateMargins() }
-        .onChange(of: store.settings.left) { _, _ in store.reapplySelectedCandidateMargins() }
-        .onChange(of: store.settings.right) { _, _ in store.reapplySelectedCandidateMargins() }
-        .onChange(of: store.settings.businessProfile) { _, _ in store.redetectSelectedPhoto() }
-        .onChange(of: store.settings.preprocessMode) { _, _ in store.redetectSelectedPhoto() }
-        .onChange(of: store.settings.algorithmMode) { _, _ in store.redetectSelectedPhoto() }
-        .onChange(of: store.settings.orientation) { _, _ in store.redetectSelectedPhoto() }
     }
 }
 
