@@ -75,6 +75,10 @@ struct CropRegion: Identifiable, Hashable, Sendable {
     var id = UUID()
     var index: Int
     var rect: CGRect
+    /// Tilt of the frame in degrees, applied as a rotation about `rect`'s
+    /// centre. 0 means axis-aligned (the historical behaviour); a non-zero
+    /// angle lets a skewed scan be cut out straight.
+    var angle: Double = 0
     var isManual: Bool = false
 }
 

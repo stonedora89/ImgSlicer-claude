@@ -197,17 +197,35 @@ struct ImageProcessor: Sendable {
         // with dark textured content, so left edges either keep the gutter or
         // cut into the subject; the snap fixes both directions.
         if let fullGray = fullResolutionGray(cgImage: cgImage) {
-            candidates = candidates.map { candidate in
-                let snapped = snapVerticalBoundaries(
+            candidates = candidates.enumerated().map { candidateOffset, candidate in
+                // Split a frame that merged two photos (a gutter the 600px pass
+                // missed because both frames are dark) before snapping, so the
+                // new sub-frames get their edges refined too.
+                let split = splitMergedFrames(
                     regions: candidate.regions,
                     gray: fullGray.bytes,
                     width: fullGray.width,
                     height: fullGray.height
                 )
+                let snapped = snapVerticalBoundaries(
+                    regions: split,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                // Tilt estimation is the costly part, so only run it for the
+                // top-ranked candidate (the one shown/output by default).
+                let estimateTilt = candidateOffset == 0
                 return CropCandidate(
                     title: candidate.title,
                     detail: candidate.detail,
-                    regions: snapped.enumerated().map { CropRegion(index: $0.offset + 1, rect: $0.element.rect.normalized, isManual: $0.element.isManual) },
+                    regions: snapped.enumerated().map {
+                        let rect = $0.element.rect.normalized
+                        let angle = (estimateTilt && !$0.element.isManual) ? estimateRegionTilt(
+                            gray: fullGray.bytes, width: fullGray.width, height: fullGray.height, rect: rect
+                        ) : 0
+                        return CropRegion(index: $0.offset + 1, rect: rect, angle: angle, isManual: $0.element.isManual)
+                    },
                     marginScale: candidate.marginScale,
                     score: candidate.score
                 )
@@ -848,14 +866,19 @@ struct ImageProcessor: Sendable {
         var outputs: [URL] = []
         for (offset, region) in regions.enumerated() {
             let crop = region.rect
-            let pixelRect = CGRect(
-                x: crop.minX * Double(cgImage.width),
-                y: crop.minY * Double(cgImage.height),
-                width: crop.width * Double(cgImage.width),
-                height: crop.height * Double(cgImage.height)
-            ).integral
-
-            guard let cropped = cgImage.cropping(to: pixelRect) else { continue }
+            let cropped: CGImage?
+            if abs(region.angle) > 0.05 {
+                cropped = rotatedCrop(cgImage, normalizedRect: crop, angleDegrees: region.angle)
+            } else {
+                let pixelRect = CGRect(
+                    x: crop.minX * Double(cgImage.width),
+                    y: crop.minY * Double(cgImage.height),
+                    width: crop.width * Double(cgImage.width),
+                    height: crop.height * Double(cgImage.height)
+                ).integral
+                cropped = cgImage.cropping(to: pixelRect)
+            }
+            guard let cropped else { continue }
             let outputURL = outputURL(for: photo, task: task, sliceIndex: offset + 1)
             do {
                 try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -868,6 +891,105 @@ struct ImageProcessor: Sendable {
             }
         }
         return outputs
+    }
+
+    /// Estimates a frame's tilt (degrees, about its centre) by projection-profile
+    /// sharpness: a frame's straight gutters/edges produce the crispest row and
+    /// column projections when the sampling axes line up with them, so we sweep a
+    /// small angle range and keep the angle that maximises that crispness. Returns
+    /// 0 unless a tilt is clearly better than straight, so square frames stay put.
+    private func estimateRegionTilt(gray: [UInt8], width: Int, height: Int, rect: CGRect) -> Double {
+        let x0 = Int((rect.minX * Double(width)).rounded())
+        let y0 = Int((rect.minY * Double(height)).rounded())
+        let bw = Int((rect.width * Double(width)).rounded())
+        let bh = Int((rect.height * Double(height)).rounded())
+        guard bw > 24, bh > 24, x0 >= 0, y0 >= 0, x0 + bw <= width, y0 + bh <= height else { return 0 }
+
+        // Downsample the box to keep the sweep cheap; tilt is scale-invariant.
+        let maxDim = 240
+        let step = max(1, max(bw, bh) / maxDim)
+        let sw = bw / step
+        let sh = bh / step
+        guard sw > 8, sh > 8 else { return 0 }
+
+        var buf = [Double](repeating: 0, count: sw * sh)
+        for sy in 0..<sh {
+            let srcY = y0 + sy * step
+            for sx in 0..<sw {
+                buf[sy * sw + sx] = Double(gray[srcY * width + x0 + sx * step])
+            }
+        }
+
+        let cxF = Double(sw) / 2, cyF = Double(sh) / 2
+        func sharpness(_ angle: Double) -> Double {
+            let s = sin(angle), c = cos(angle)
+            var rows = [Double](repeating: 0, count: sh)
+            var cols = [Double](repeating: 0, count: sw)
+            for y in 0..<sh {
+                let dy = Double(y) - cyF
+                for x in 0..<sw {
+                    let dx = Double(x) - cxF
+                    let v = buf[y * sw + x]
+                    let r = Int((dx * s + dy * c + cyF).rounded())
+                    let k = Int((dx * c - dy * s + cxF).rounded())
+                    if r >= 0, r < sh { rows[r] += v }
+                    if k >= 0, k < sw { cols[k] += v }
+                }
+            }
+            func crisp(_ p: [Double]) -> Double {
+                var sum = 0.0
+                for i in 1..<p.count { let d = p[i] - p[i - 1]; sum += d * d }
+                return sum
+            }
+            return crisp(rows) + crisp(cols)
+        }
+
+        let base = sharpness(0)
+        var bestAngle = 0.0
+        var bestScore = base
+        var a = -8.0
+        while a <= 8.0 {
+            if abs(a) > 0.01 {
+                let sc = sharpness(a * .pi / 180)
+                if sc > bestScore { bestScore = sc; bestAngle = a }
+            }
+            a += 0.25
+        }
+        // Require a clear win over straight, otherwise leave the frame as-is.
+        return bestScore > base * 1.04 ? bestAngle : 0
+    }
+
+    /// Cuts out a tilted frame and rotates it upright. `normalizedRect` is the
+    /// un-rotated box (0…1, top-left origin); `angleDegrees` is its tilt about
+    /// the box centre. The output is the box's content, deskewed.
+    private func rotatedCrop(_ src: CGImage, normalizedRect rect: CGRect, angleDegrees: Double) -> CGImage? {
+        let imgW = Double(src.width)
+        let imgH = Double(src.height)
+        let outW = max(1, Int((rect.width * imgW).rounded()))
+        let outH = max(1, Int((rect.height * imgH).rounded()))
+        // Box centre in CoreGraphics' bottom-left, y-up pixel space.
+        let cx = rect.midX * imgW
+        let cy = (1.0 - rect.midY) * imgH
+
+        let colorSpace = src.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: outW,
+            height: outH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        ctx.interpolationQuality = .high
+        // Place the (rotated) box centre at the output centre, undo the tilt,
+        // then draw the whole source upright (CG-native orientation).
+        ctx.translateBy(x: CGFloat(outW) / 2, y: CGFloat(outH) / 2)
+        ctx.rotate(by: CGFloat(angleDegrees * .pi / 180))
+        ctx.translateBy(x: -CGFloat(cx), y: -CGFloat(cy))
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: imgW, height: imgH))
+        return ctx.makeImage()
     }
 
     private func outputURL(for photo: PhotoItem, task: FolderTask, sliceIndex: Int) -> URL {
@@ -1157,6 +1279,70 @@ struct ImageProcessor: Sendable {
                 horizontalEdge(at: maxY, outsideTop: false),
             ]
         }
+    }
+
+    /// Split a frame that actually holds two (or more) photos because the 600px
+    /// pass missed the dark gutter between them — common when both neighbours
+    /// are dark (an aquarium strip). A frame much wider than the strip's median
+    /// is a merge of k≈width/median photos; the hidden gutter near each expected
+    /// boundary is recovered at full resolution (the darkest flat column) and
+    /// the frame is cut there. Conservative: only fires when EVERY expected
+    /// gutter is actually found, so a genuinely wide single frame is left alone.
+    /// The new sub-frame edges sit on the gutters; the following snap refines
+    /// them onto the content.
+    private func splitMergedFrames(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count >= 2, width > 8, height > 8, gray.count >= width * height else { return regions }
+        let normWidths = regions.map { Double($0.rect.normalized.width) }.sorted()
+        let medianW = normWidths[normWidths.count / 2]
+        guard medianW > 0.04 else { return regions }
+
+        func columnMeanStd(_ x: Int, _ yr: Range<Int>) -> (mean: Double, std: Double) {
+            var sum = 0.0, sq = 0.0
+            for y in yr { let v = Double(gray[y * width + x]); sum += v; sq += v * v }
+            let n = Double(yr.count), m = sum / n
+            return (m, (sq / n - m * m).squareRoot())
+        }
+
+        var out: [CropRegion] = []
+        for region in regions {
+            let r = region.rect.normalized
+            let k = Int((Double(r.width) / medianW).rounded())
+            // ≥1.45× median = at least a double frame. The "every gutter must be
+            // found" guard below is the real safety against splitting a genuinely
+            // wide single frame, so this threshold can be generous.
+            guard k >= 2, Double(r.width) >= medianW * 1.45 else { out.append(region); continue }
+            let x0 = max(0, Int(r.minX * Double(width))), x1 = min(width, Int(r.maxX * Double(width)))
+            let y0 = max(0, Int(r.minY * Double(height))), y1 = min(height, Int(r.maxY * Double(height)))
+            guard x1 - x0 > 16, y1 - y0 > 16 else { out.append(region); continue }
+            let yr = (y0 + (y1 - y0) / 6)..<(y1 - (y1 - y0) / 6)
+            guard !yr.isEmpty else { out.append(region); continue }
+
+            // Find a dark, flat gutter near each of the k-1 expected boundaries.
+            var cuts: [Int] = []
+            for i in 1..<k {
+                let target = x0 + (x1 - x0) * i / k
+                let win = max(8, (x1 - x0) / (k * 3))
+                var best: (mean: Double, x: Int)? = nil
+                for x in max(x0 + 6, target - win)..<min(x1 - 6, target + win) {
+                    let s = columnMeanStd(x, yr)
+                    guard s.mean <= 60, s.std <= 22 else { continue }
+                    if best == nil || s.mean < best!.mean { best = (s.mean, x) }
+                }
+                if let b = best { cuts.append(b.x) }
+            }
+            guard cuts.count == k - 1 else { out.append(region); continue }
+
+            let bounds = [x0] + cuts.sorted() + [x1]
+            for j in 0..<(bounds.count - 1) {
+                let a = bounds[j], b = bounds[j + 1]
+                guard b - a > 16 else { continue }
+                let rect = CGRect(x: Double(a) / Double(width), y: r.minY,
+                                  width: Double(b - a) / Double(width), height: r.height).normalized
+                out.append(CropRegion(index: out.count + 1, rect: rect, isManual: region.isManual))
+            }
+        }
+        guard out.count > regions.count else { return regions }
+        return out.enumerated().map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, isManual: $0.element.isManual) }
     }
 
     private func snapVerticalBoundaries(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {

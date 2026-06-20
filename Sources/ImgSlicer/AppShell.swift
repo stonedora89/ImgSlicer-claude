@@ -473,9 +473,23 @@ struct DrawRegionLayer: View {
                 }
             }
             .contentShape(Rectangle())
+            // Crosshair cursor signals "draw a box here". onContinuousHover
+            // re-asserts it on every move (so a drag keeps it), and .set() can't
+            // unbalance a cursor stack; onDisappear restores the arrow in case
+            // draw mode is exited while the pointer is still inside.
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    NSCursor.crosshair.set()
+                case .ended:
+                    NSCursor.arrow.set()
+                }
+            }
+            .onDisappear { NSCursor.arrow.set() }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        NSCursor.crosshair.set()
                         let start = startPoint ?? value.startLocation
                         startPoint = start
                         currentRect = pixelRect(from: start, to: value.location, in: proxy.size)
@@ -567,6 +581,7 @@ struct CropOverlay: View {
                     .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
                     .background(Rectangle().fill(Color.black.opacity(0.001)))
                     .frame(width: draw.width, height: draw.height)
+                    .rotationEffect(.degrees(region.angle))
                     .offset(x: draw.minX, y: draw.minY)
                     .gesture(dragGesture(in: proxy.size, corner: nil))
                     .onTapGesture { onSelect() }
@@ -1048,19 +1063,43 @@ struct DropZoneOverlay: View {
 }
 
 struct EmptyQueueView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var hovering = false
+
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "folder.badge.plus")
-                .font(.system(size: 34))
-            Text("暂无任务")
-                .font(.system(size: 13, weight: .semibold))
-            Text("导入文件夹后会按来源建立队列")
-                .font(.system(size: 11))
-                .foregroundStyle(AppTheme.muted)
+        Button {
+            store.pickFiles()
+        } label: {
+            VStack(spacing: 10) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 34))
+                Text("暂无任务")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("点击此处导入，或拖入文件夹 / 图片")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.muted)
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundStyle(AppTheme.muted)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 64)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.white.opacity(store.isDropTargeted ? 0.06 : hovering ? 0.03 : 0))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(
+                        style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])
+                    )
+                    .foregroundStyle((store.isDropTargeted ? AppTheme.blue : AppTheme.line).opacity(store.isDropTargeted ? 0.9 : 1))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 14))
         }
-        .foregroundStyle(AppTheme.muted)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 80)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("点击打开导入，或把文件夹 / 图片拖到这里")
     }
 }
 

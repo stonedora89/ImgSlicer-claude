@@ -14,7 +14,7 @@ struct CropEditStore: Sendable {
             guard let edit = edits.photos[relativePath], !edit.regions.isEmpty else { continue }
             let isManual = edit.isManual ?? true
             restored.photos[photoIndex].cropRegions = edit.regions.enumerated().map { offset, rect in
-                CropRegion(index: offset + 1, rect: rect.cgRect, isManual: isManual)
+                CropRegion(index: offset + 1, rect: rect.cgRect, angle: rect.angle ?? 0, isManual: isManual)
             }
             restored.photos[photoIndex].isManual = isManual
             restored.photos[photoIndex].status = isManual ? .manual : .located
@@ -27,7 +27,7 @@ struct CropEditStore: Sendable {
         edits.photos[photo.relativePath] = SavedPhotoEdit(
             updatedAt: Date(),
             isManual: photo.isManual,
-            regions: photo.cropRegions.map { SavedRect(rect: $0.rect) }
+            regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
         )
         write(edits: edits, rootURL: task.rootURL)
     }
@@ -39,7 +39,7 @@ struct CropEditStore: Sendable {
             edits.photos[photo.relativePath] = SavedPhotoEdit(
                 updatedAt: now,
                 isManual: photo.isManual,
-                regions: photo.cropRegions.map { SavedRect(rect: $0.rect) }
+                regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
             )
         }
         write(edits: edits, rootURL: task.rootURL)
@@ -88,12 +88,15 @@ private struct SavedRect: Codable {
     var y: Double
     var width: Double
     var height: Double
+    // Optional so edits written before deskew existed still decode (missing -> 0).
+    var angle: Double?
 
-    init(rect: CGRect) {
+    init(rect: CGRect, angle: Double) {
         x = rect.origin.x
         y = rect.origin.y
         width = rect.size.width
         height = rect.size.height
+        self.angle = angle
     }
 
     var cgRect: CGRect {
