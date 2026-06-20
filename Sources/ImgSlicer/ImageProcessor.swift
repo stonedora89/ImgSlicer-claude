@@ -1358,7 +1358,6 @@ struct ImageProcessor: Sendable {
         let medianWidth = widths.isEmpty ? Double(width) : widths[widths.count / 2]
         let cap = max(1, Int(medianWidth * 0.30))
 
-        let rawFlatMax = 12.0   // raw std below this = flat (grain only), not texture
         // Classify a column on a per-frame auto-levelled view: each value is
         // contrast-stretched into the frame's own 2–98% range (lo…lo+span). In a
         // very dark frame (an aquarium) the subject sits in raw 10–20 with tiny
