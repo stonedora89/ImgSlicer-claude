@@ -1359,22 +1359,35 @@ struct ImageProcessor: Sendable {
         let cap = max(1, Int(medianWidth * 0.30))
 
         let rawFlatMax = 12.0   // raw std below this = flat (grain only), not texture
-        func classify(_ x: Int, _ yRange: Range<Int>) -> (content: Bool, gutter: Bool) {
-            var sum = 0.0, sumSq = 0.0, rawSum = 0.0, rawSumSq = 0.0
+        // Classify a column on a per-frame auto-levelled view: each value is
+        // contrast-stretched into the frame's own 2–98% range (lo…lo+span). In a
+        // very dark frame (an aquarium) the subject sits in raw 10–20 with tiny
+        // raw variance — indistinguishable from the black gutter — but stretching
+        // the frame's own range reveals its texture, so dark CONTENT separates
+        // from the still-flat gutter. `lut` (shadow lift) is kept as a floor for
+        // normal frames. The transform is detection-only; crops use raw pixels.
+        func classify(_ x: Int, _ yRange: Range<Int>, _ lo: Double, _ span: Double) -> (content: Bool, gutter: Bool) {
+            var sum = 0.0, sumSq = 0.0, rawSum = 0.0, sSum = 0.0, sSumSq = 0.0
             for y in yRange {
                 let raw = gray[y * width + x]
                 sum += lut[Int(raw)]; sumSq += lut[Int(raw)] * lut[Int(raw)]
-                rawSum += Double(raw); rawSumSq += Double(raw) * Double(raw)
+                rawSum += Double(raw)
+                let s = min(255.0, max(0.0, (Double(raw) - lo) / span * 255.0))
+                sSum += s; sSumSq += s * s
             }
             let n = Double(yRange.count)
             let liftedStd = (sumSq / n - (sum / n) * (sum / n)).squareRoot()
+            let stretchedStd = (sSumSq / n - (sSum / n) * (sSum / n)).squareRoot()
             let rawMean = rawSum / n
-            let rawStd = (rawSumSq / n - rawMean * rawMean).squareRoot()
-            // A gutter is dark AND flat in RAW terms (grain only). Keying the
-            // gutter on raw std stops the shadow lift from amplifying gutter
-            // grain into false "texture" that would let an edge run past it.
-            let gutter = rawMean <= darkMax && rawStd <= rawFlatMax
-            let content = !gutter && liftedStd >= textureMin
+            // Gutter: dark AND flat after the per-frame stretch. Keying flatness
+            // on the STRETCHED std (not raw) is essential in dark frames — the
+            // subject right at the edge is near-black with tiny RAW variance, so a
+            // raw-std test would brand it gutter and the edge would never pull in;
+            // the stretch lifts its texture above the flat gutter. A real gutter
+            // stays flat under the stretch. Content: textured under the lift or
+            // the stretch.
+            let gutter = rawMean <= darkMax && stretchedStd <= 15.0
+            let content = !gutter && (liftedStd >= textureMin || stretchedStd >= textureMin)
             return (content, gutter)
         }
 
@@ -1390,11 +1403,26 @@ struct ImageProcessor: Sendable {
             let yRange = (minY + inset)..<(maxY - inset)
             guard !yRange.isEmpty else { return region }
 
+            // Per-frame auto-levels bounds (2–98% of the frame interior), so the
+            // stretch in `classify` adapts to this frame's own exposure.
+            var samples: [UInt8] = []
+            let sStepX = max(1, boxW / 100), sStepY = max(1, boxH / 100)
+            var sy = minY
+            while sy < maxY {
+                var sx = minX
+                while sx < maxX { samples.append(gray[sy * width + sx]); sx += sStepX }
+                sy += sStepY
+            }
+            samples.sort()
+            let loV = samples.isEmpty ? 0.0 : Double(samples[samples.count * 2 / 100])
+            let hiV = samples.isEmpty ? 255.0 : Double(samples[min(samples.count - 1, samples.count * 98 / 100)])
+            let spanV = max(1.0, hiV - loV)
+
             // Precompute gutter/content for the search windows around each edge.
             var cls: [Int: (content: Bool, gutter: Bool)] = [:]
             func c(_ x: Int) -> (content: Bool, gutter: Bool) {
                 if let v = cls[x] { return v }
-                let v = classify(x, yRange); cls[x] = v; return v
+                let v = classify(x, yRange, loV, spanV); cls[x] = v; return v
             }
 
             // A real inter-frame gutter is a solid black band several pixels
