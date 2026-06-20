@@ -8,6 +8,7 @@ final class AppStore: ObservableObject {
     @Published var selectedTaskID: FolderTask.ID?
     @Published var selectedPhotoID: PhotoItem.ID?
     @Published var selectedCropRegionID: CropRegion.ID?
+    @Published var isDrawingNewRegion = false
     @Published var settings = CropSettings()
     @Published var lastImportSummary: ImportSummary?
     @Published var isDropTargeted = false
@@ -195,16 +196,49 @@ final class AppStore: ObservableObject {
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 手动微调已作为参考样本"
     }
 
-    func addCropRegionToSelectedPhoto() {
+    /// Enters marquee mode: the next drag on the preview defines a brand-new
+    /// box exactly where the user wants it, instead of dropping one at a guessed
+    /// position. Toggling the button again cancels.
+    func toggleDrawNewRegion() {
+        guard selectedPhoto != nil else { return }
+        isDrawingNewRegion.toggle()
+        if isDrawingNewRegion {
+            logMessage = "框选模式：在预览图上拖出一个新的裁切框。"
+            logSubMessage = "按 Esc 或再次点击按钮取消。"
+        } else {
+            logMessage = "已退出框选模式。"
+            logSubMessage = ""
+        }
+    }
+
+    func cancelDrawNewRegion() {
+        guard isDrawingNewRegion else { return }
+        isDrawingNewRegion = false
+        logMessage = "已取消框选。"
+        logSubMessage = ""
+    }
+
+    /// Adds a box at the rectangle the user dragged out (normalized image
+    /// coordinates), then leaves marquee mode.
+    func addCropRegion(rect: CGRect) {
+        isDrawingNewRegion = false
         guard let indexes = selectedIndexes() else { return }
         let regions = tasks[indexes.task].photos[indexes.photo].cropRegions
-        let nextRect = newRegionRect(after: regions.last?.rect)
-        let newRegion = CropRegion(index: regions.count + 1, rect: nextRect, isManual: true)
+        let newRegion = CropRegion(index: regions.count + 1, rect: rect.normalizedCropRect, isManual: true)
         tasks[indexes.task].photos[indexes.photo].cropRegions.append(newRegion)
         selectedCropRegionID = newRegion.id
-        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已新增标准框")
-        logMessage = "已新增一个可拖动标准框。"
-        logSubMessage = "拖准后可作为模板重铺当前图片。"
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已框选新增裁切框")
+        logMessage = "已按你框选的位置新增裁切框。"
+        logSubMessage = "可继续拖动框体或调整四角。"
+    }
+
+    /// Deletes whichever box is currently selected — the entry point for the
+    /// keyboard Delete key, mirroring the per-box "x" button.
+    @discardableResult
+    func deleteSelectedCropRegion() -> Bool {
+        guard let regionID = selectedCropRegionID else { return false }
+        deleteSelectedCrop(regionID: regionID)
+        return true
     }
 
     func deleteSelectedCrop(regionID: CropRegion.ID) {
@@ -727,19 +761,6 @@ final class AppStore: ObservableObject {
             }
     }
 
-    private func newRegionRect(after rect: CGRect?) -> CGRect {
-        guard let rect else {
-            return CGRect(x: 0.28, y: 0.28, width: 0.44, height: 0.44)
-        }
-
-        let width = min(max(rect.width, 0.12), 0.82)
-        let height = min(max(rect.height, 0.12), 0.82)
-        var x = rect.minX + min(0.06, max(0.03, width * 0.12))
-        var y = rect.minY + min(0.06, max(0.03, height * 0.12))
-        if x + width > 1 { x = max(0, 1 - width) }
-        if y + height > 1 { y = max(0, 1 - height) }
-        return CGRect(x: x, y: y, width: width, height: height).normalizedCropRect
-    }
 
     private func saveCurrentPhotoIfNeeded() {
         guard let indexes = selectedIndexes() else { return }

@@ -34,6 +34,19 @@ struct AppShell: View {
                 break
             }
         }
+        .onKeyPress(.delete) {
+            // ⌫ deletes the selected box, same as its "x" button. Fall through
+            // (.ignored) when nothing is selected so the keystroke isn't eaten.
+            store.deleteSelectedCropRegion() ? .handled : .ignored
+        }
+        .onKeyPress(.deleteForward) {
+            store.deleteSelectedCropRegion() ? .handled : .ignored
+        }
+        .onKeyPress(.escape) {
+            guard store.isDrawingNewRegion else { return .ignored }
+            store.cancelDrawNewRegion()
+            return .handled
+        }
         .onDrop(of: [.fileURL], isTargeted: $store.isDropTargeted) { providers in
             loadDroppedURLs(providers)
         }
@@ -285,11 +298,15 @@ struct PreviewWorkspace: View {
                                 image: image,
                                 regions: photo.cropRegions,
                                 selectedRegionID: store.selectedCropRegionID,
+                                isDrawing: store.isDrawingNewRegion,
                                 onDelete: { regionID in
                                     store.deleteSelectedCrop(regionID: regionID)
                                 },
                                 onSelect: { regionID in
                                     store.selectCropRegion(regionID)
+                                },
+                                onDrawNewRegion: { rect in
+                                    store.addCropRegion(rect: rect)
                                 }
                             ) { regionID, rect in
                                 store.updateSelectedCrop(regionID: regionID, rect: rect)
@@ -358,8 +375,10 @@ struct PhotoCanvas: View {
     let image: NSImage
     let regions: [CropRegion]
     let selectedRegionID: CropRegion.ID?
+    let isDrawing: Bool
     let onDelete: (CropRegion.ID) -> Void
     let onSelect: (CropRegion.ID) -> Void
+    let onDrawNewRegion: (CGRect) -> Void
     let onCropChange: (CropRegion.ID, CGRect) -> Void
 
     var body: some View {
@@ -382,6 +401,14 @@ struct PhotoCanvas: View {
                 )
                 .frame(width: imageRect.width, height: imageRect.height)
                 .offset(x: imageRect.minX, y: imageRect.minY)
+
+                if isDrawing {
+                    // Marquee layer sits on top while in draw mode: the user drags
+                    // a rectangle and we hand back its normalized coordinates.
+                    DrawRegionLayer(onComplete: onDrawNewRegion)
+                        .frame(width: imageRect.width, height: imageRect.height)
+                        .offset(x: imageRect.minX, y: imageRect.minY)
+                }
             }
         }
     }
@@ -394,6 +421,68 @@ struct PhotoCanvas: View {
         let width = imageSize.width * scale
         let height = imageSize.height * scale
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
+    }
+}
+
+/// Full-image overlay shown in marquee mode. The user drags out a rectangle;
+/// on release we report it back in normalized [0,1] image coordinates. Tiny
+/// drags (an accidental click) are ignored so no zero-size box is created.
+struct DrawRegionLayer: View {
+    let onComplete: (CGRect) -> Void
+    @State private var startPoint: CGPoint?
+    @State private var currentRect: CGRect?
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(Color.black.opacity(0.28))
+                if let rect = currentRect {
+                    Rectangle()
+                        .fill(AppTheme.orange.opacity(0.16))
+                        .overlay(Rectangle().stroke(AppTheme.orange, lineWidth: 2))
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let start = startPoint ?? value.startLocation
+                        startPoint = start
+                        currentRect = pixelRect(from: start, to: value.location, in: proxy.size)
+                    }
+                    .onEnded { value in
+                        let start = startPoint ?? value.startLocation
+                        let rect = pixelRect(from: start, to: value.location, in: proxy.size)
+                        startPoint = nil
+                        currentRect = nil
+                        guard rect.width > 6, rect.height > 6,
+                              proxy.size.width > 0, proxy.size.height > 0 else { return }
+                        onComplete(CGRect(
+                            x: rect.minX / proxy.size.width,
+                            y: rect.minY / proxy.size.height,
+                            width: rect.width / proxy.size.width,
+                            height: rect.height / proxy.size.height
+                        ))
+                    }
+            )
+        }
+    }
+
+    private func pixelRect(from a: CGPoint, to b: CGPoint, in size: CGSize) -> CGRect {
+        let x = min(a.x, b.x).clamped(to: 0...size.width)
+        let y = min(a.y, b.y).clamped(to: 0...size.height)
+        let maxX = max(a.x, b.x).clamped(to: 0...size.width)
+        let maxY = max(a.y, b.y).clamped(to: 0...size.height)
+        return CGRect(x: x, y: y, width: maxX - x, height: maxY - y)
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
 
@@ -597,13 +686,13 @@ struct ParameterPanel: View {
                     .font(.system(size: 15, weight: .bold))
                 HStack(spacing: 7) {
                     Button {
-                        store.addCropRegionToSelectedPhoto()
+                        store.toggleDrawNewRegion()
                     } label: {
-                        Image(systemName: "plus.viewfinder")
+                        Image(systemName: store.isDrawingNewRegion ? "viewfinder" : "plus.viewfinder")
                     }
-                    .buttonStyle(AccentIconButtonStyle(color: AppTheme.orange))
+                    .buttonStyle(AccentIconButtonStyle(color: store.isDrawingNewRegion ? AppTheme.green : AppTheme.orange))
                     .disabled(store.selectedPhoto == nil)
-                    .help("添加一个新的裁切框，可在预览区拖动和调整四角")
+                    .help("框选新增：点亮后在预览图上拖出一个新的裁切框（Esc 取消）")
 
                     Button {
                         store.smartRedetectSelectedPhoto()
