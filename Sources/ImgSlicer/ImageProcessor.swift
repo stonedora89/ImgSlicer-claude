@@ -1068,6 +1068,96 @@ struct ImageProcessor: Sendable {
         return output
     }
 
+    /// Per-frame edge reliability in [0,1] for [left, right, top, bottom]: how
+    /// cleanly each edge sits at a gutter→content transition — film gutter just
+    /// OUTSIDE the box, photographic content just INSIDE. A clean boundary scores
+    /// high; an edge cut into the subject (no gutter outside) or one that still
+    /// includes gutter (no content inside) scores low. This is the trust signal
+    /// the consensus-template step uses to decide which edges to keep and which
+    /// to reconstruct from the template.
+    func edgeReliabilities(regions: [CropRegion], cgImage: CGImage) -> [[Double]] {
+        guard let g = fullResolutionGray(cgImage: cgImage) else { return regions.map { _ in [0, 0, 0, 0] } }
+        let gray = g.bytes, W = g.width, H = g.height
+        let lut = ImageProcessor.shadowLiftLUT
+        let textureMin = 22.0, darkMax = 70.0, brightMin = 215.0, rawFlatMax = 12.0
+
+        func columnIsContentGutter(_ x: Int, _ yr: Range<Int>) -> (content: Bool, gutter: Bool) {
+            var s = 0.0, sq = 0.0, r = 0.0, rsq = 0.0
+            for y in yr { let v = gray[y * W + x]; s += lut[Int(v)]; sq += lut[Int(v)] * lut[Int(v)]; r += Double(v); rsq += Double(v) * Double(v) }
+            let n = Double(yr.count), m = r / n
+            let ls = (sq / n - (s / n) * (s / n)).squareRoot(), rs = (rsq / n - m * m).squareRoot()
+            let gut = rs <= rawFlatMax && (m <= darkMax || m >= brightMin)
+            return (!gut && ls >= textureMin, gut)
+        }
+        func rowIsContentGutter(_ y: Int, _ xr: Range<Int>) -> (content: Bool, gutter: Bool) {
+            var s = 0.0, sq = 0.0, r = 0.0, rsq = 0.0
+            let off = y * W
+            for x in xr { let v = gray[off + x]; s += lut[Int(v)]; sq += lut[Int(v)] * lut[Int(v)]; r += Double(v); rsq += Double(v) * Double(v) }
+            let n = Double(xr.count), m = r / n
+            let ls = (sq / n - (s / n) * (s / n)).squareRoot(), rs = (rsq / n - m * m).squareRoot()
+            let gut = rs <= rawFlatMax && (m <= darkMax || m >= brightMin)
+            return (!gut && ls >= textureMin, gut)
+        }
+
+        return regions.map { region in
+            let rect = region.rect.normalized
+            let minX = max(0, min(W - 1, Int(rect.minX * Double(W))))
+            let maxX = max(minX + 1, min(W, Int(rect.maxX * Double(W))))
+            let minY = max(0, min(H - 1, Int(rect.minY * Double(H))))
+            let maxY = max(minY + 1, min(H, Int(rect.maxY * Double(H))))
+            let bw = maxX - minX, bh = maxY - minY
+            guard bw > 16, bh > 16 else { return [0, 0, 0, 0] }
+            let band = max(2, Int(Double(min(bw, bh)) * 0.012))
+            let slices = 6
+
+            // A vertical edge is scored in horizontal slices so a TILTED gutter
+            // (gutter only over part of the height of any single column) still
+            // scores high: each slice checks its own local outside-gutter /
+            // inside-content transition. Reliability = fraction of slices that
+            // show the transition.
+            func verticalEdge(at x: Int, outsideLeft: Bool) -> Double {
+                guard x > 0, x < W else { return 1.0 }  // image border: nothing to verify
+                var ok = 0, total = 0
+                for s in 0..<slices {
+                    let y0 = minY + bh / 10 + (bh * 8 / 10) * s / slices
+                    let y1 = minY + bh / 10 + (bh * 8 / 10) * (s + 1) / slices
+                    guard y1 > y0 else { continue }
+                    let yr = y0..<y1
+                    let insideRange = outsideLeft ? x..<min(x + band, maxX) : max(minX, x - band)..<x
+                    let outsideRange = outsideLeft ? max(0, x - band)..<x : x..<min(W, x + band)
+                    let inside = insideRange.contains { columnIsContentGutter($0, yr).content }
+                    let outside = outsideRange.contains { columnIsContentGutter($0, yr).gutter }
+                    total += 1
+                    if inside && outside { ok += 1 }
+                }
+                return total == 0 ? 0 : Double(ok) / Double(total)
+            }
+            func horizontalEdge(at y: Int, outsideTop: Bool) -> Double {
+                guard y > 0, y < H else { return 1.0 }
+                var ok = 0, total = 0
+                for s in 0..<slices {
+                    let x0 = minX + bw / 10 + (bw * 8 / 10) * s / slices
+                    let x1 = minX + bw / 10 + (bw * 8 / 10) * (s + 1) / slices
+                    guard x1 > x0 else { continue }
+                    let xr = x0..<x1
+                    let insideRange = outsideTop ? y..<min(y + band, maxY) : max(minY, y - band)..<y
+                    let outsideRange = outsideTop ? max(0, y - band)..<y : y..<min(H, y + band)
+                    let inside = insideRange.contains { rowIsContentGutter($0, xr).content }
+                    let outside = outsideRange.contains { rowIsContentGutter($0, xr).gutter }
+                    total += 1
+                    if inside && outside { ok += 1 }
+                }
+                return total == 0 ? 0 : Double(ok) / Double(total)
+            }
+            return [
+                verticalEdge(at: minX, outsideLeft: true),
+                verticalEdge(at: maxX, outsideLeft: false),
+                horizontalEdge(at: minY, outsideTop: true),
+                horizontalEdge(at: maxY, outsideTop: false),
+            ]
+        }
+    }
+
     private func snapVerticalBoundaries(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
         guard width > 8, height > 8, gray.count >= width * height else { return regions }
         let lut = ImageProcessor.shadowLiftLUT
