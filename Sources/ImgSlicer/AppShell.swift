@@ -34,19 +34,7 @@ struct AppShell: View {
                 break
             }
         }
-        .onKeyPress(.delete) {
-            // ⌫ deletes the selected box, same as its "x" button. Fall through
-            // (.ignored) when nothing is selected so the keystroke isn't eaten.
-            store.deleteSelectedCropRegion() ? .handled : .ignored
-        }
-        .onKeyPress(.deleteForward) {
-            store.deleteSelectedCropRegion() ? .handled : .ignored
-        }
-        .onKeyPress(.escape) {
-            guard store.isDrawingNewRegion else { return .ignored }
-            store.cancelDrawNewRegion()
-            return .handled
-        }
+        .background { keyboardShortcutSinks }
         .onDrop(of: [.fileURL], isTargeted: $store.isDropTargeted) { providers in
             loadDroppedURLs(providers)
         }
@@ -67,6 +55,28 @@ struct AppShell: View {
         } message: { prompt in
             Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
         }
+    }
+
+    /// Invisible buttons whose keyboard shortcuts work whenever the window is
+    /// key — unlike `.onKeyPress`, they don't depend on a particular subview
+    /// holding focus, so Delete/Esc fire even after the user has clicked a box
+    /// on the canvas. Disabled when not applicable so the keystroke falls
+    /// through instead of being silently swallowed.
+    private var keyboardShortcutSinks: some View {
+        Group {
+            Button("Delete frame") { store.deleteSelectedCropRegion() }
+                .keyboardShortcut(.delete, modifiers: [])
+                .disabled(store.selectedCropRegionID == nil)
+            Button("Delete frame (forward)") { store.deleteSelectedCropRegion() }
+                .keyboardShortcut(.deleteForward, modifiers: [])
+                .disabled(store.selectedCropRegionID == nil)
+            Button("Cancel marquee") { store.cancelDrawNewRegion() }
+                .keyboardShortcut(.cancelAction)
+                .disabled(!store.isDrawingNewRegion)
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private func loadDroppedURLs(_ providers: [NSItemProvider]) -> Bool {
