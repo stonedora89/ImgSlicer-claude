@@ -2,6 +2,14 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A staged re-detect awaiting the user's confirmation because it would
+/// discard the photo's manual corrections.
+struct ManualRedetectPrompt: Identifiable {
+    let id = UUID()
+    let photoName: String
+    let action: () -> Void
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published var tasks: [FolderTask] = []
@@ -14,6 +22,9 @@ final class AppStore: ObservableObject {
     @Published var isDropTargeted = false
     @Published var logMessage = "导入文件或文件夹后，系统会递归识别图片并建立独立任务。"
     @Published var logSubMessage = "原图只读，输出写入新的 ImgSlicer_Output 目录。"
+    /// Set when a re-detect would discard a photo's manual corrections; the UI
+    /// shows a confirmation and only proceeds if the user accepts.
+    @Published var manualRedetectPrompt: ManualRedetectPrompt?
 
     private let scanner = FolderScanner()
     private let processor = ImageProcessor()
@@ -316,7 +327,33 @@ final class AppStore: ObservableObject {
         logSubMessage = "同文件夹后续识别会优先参考宽高、比例、面积和边缘特征。"
     }
 
+    /// Re-detect the selected photo, but if it carries manual corrections, ask
+    /// first — re-detection replaces the hand-adjusted boxes with fresh
+    /// automatic ones, so it must never wipe a correction silently.
     func redetectSelectedPhoto() {
+        guardingManualCorrections { [weak self] in self?.performRedetectSelectedPhoto() }
+    }
+
+    /// Run `action` immediately unless the selected photo is manually corrected,
+    /// in which case stage a confirmation prompt instead.
+    private func guardingManualCorrections(_ action: @escaping () -> Void) {
+        guard let indexes = selectedIndexes(),
+              tasks[indexes.task].photos[indexes.photo].isManual else {
+            action()
+            return
+        }
+        let name = tasks[indexes.task].photos[indexes.photo].name
+        manualRedetectPrompt = ManualRedetectPrompt(photoName: name, action: action)
+    }
+
+    /// Confirm a staged re-detect, discarding the manual corrections.
+    func confirmManualRedetect() {
+        let action = manualRedetectPrompt?.action
+        manualRedetectPrompt = nil
+        action?()
+    }
+
+    private func performRedetectSelectedPhoto() {
         guard let indexes = selectedIndexes() else { return }
         let photoURL = tasks[indexes.task].photos[indexes.photo].url
         let taskID = tasks[indexes.task].id

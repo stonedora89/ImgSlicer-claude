@@ -50,6 +50,23 @@ struct AppShell: View {
         .onDrop(of: [.fileURL], isTargeted: $store.isDropTargeted) { providers in
             loadDroppedURLs(providers)
         }
+        .alert(
+            "该图片有手动修正",
+            isPresented: Binding(
+                get: { store.manualRedetectPrompt != nil },
+                set: { if !$0 { store.manualRedetectPrompt = nil } }
+            ),
+            presenting: store.manualRedetectPrompt
+        ) { _ in
+            Button("重新识别（丢弃手动修正）", role: .destructive) {
+                store.confirmManualRedetect()
+            }
+            Button("保留手动修正", role: .cancel) {
+                store.manualRedetectPrompt = nil
+            }
+        } message: { prompt in
+            Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
+        }
     }
 
     private func loadDroppedURLs(_ providers: [NSItemProvider]) -> Bool {
