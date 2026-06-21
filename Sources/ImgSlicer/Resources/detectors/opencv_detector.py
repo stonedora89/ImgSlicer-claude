@@ -203,6 +203,7 @@ def detect_structured_layout(gray, scale):
                 row_spans = dominant_spans(row_spans, 2)
             if 1 < len(row_spans) <= 4:
                 return boxes_from_grid(gray, row_spans, col_spans, scale=scale)
+            col_spans = regularize_strip_spans(gray, col_spans, axis="x")
             return boxes_from_spans(gray, col_spans, 0, height, axis="x", scale=scale)
 
     if height >= width * 1.8:
@@ -213,6 +214,7 @@ def detect_structured_layout(gray, scale):
             col_spans = split_axis_by_separators(gray, axis="x")
             if 1 < len(col_spans) <= 4:
                 return boxes_from_grid(gray, row_spans, col_spans, scale=scale)
+            row_spans = regularize_strip_spans(gray, row_spans, axis="y")
             return boxes_from_spans(gray, row_spans, 0, width, axis="y", scale=scale)
 
     return []
@@ -450,6 +452,74 @@ def split_axis_by_separators(gray, axis):
             spans.append((a, b))
 
     return spans
+
+
+def regularize_strip_spans(gray, spans, axis):
+    """Snap an irregular single-row run of frame spans onto the strip's best
+    even lattice.
+
+    The frames of one roll share a single pitch, so the true inter-frame cuts
+    form a regular comb spanning the strip. Per-line detection alone places
+    those cuts from local evidence, which fails exactly where the evidence is
+    weak: a crushed-dark frame with no visible gutter is over- or under-cut.
+
+    We pick the frame count whose even comb best lands on real separators (mean
+    separator-profile at the predicted cuts) — this corrects both over- and
+    under-segmentation in one step — then, for each comb line, KEEP the detected
+    cut if one sits nearby (evidence is more accurate than the even comb) and
+    only fall back to the comb prediction where no cut was found (the dark-frame
+    case, where the prior fills the gap that brightening never could). Detected
+    cuts that match no comb line are dropped, which removes the over-segmenting
+    extra frame.
+
+    Conservative by construction: on an already-regular strip every comb line
+    finds its own detected cut, so the spans are returned unchanged — the comb
+    is used to choose the count and to locate gaps, never to override a cut the
+    per-frame detector already placed well.
+    """
+    if os.environ.get("IMGSLICER_NO_LATTICE") == "1" or len(spans) < 2:
+        return spans
+
+    height, width = gray.shape[:2]
+    full = width if axis == "x" else height
+    profile = moving_average(separator_profile(gray, axis), max(3, full // 180))
+    profile = np.asarray(profile, dtype=float)
+    last = len(profile) - 1
+    if last < 1:
+        return spans
+
+    def at(pos):
+        return float(profile[min(last, max(0, int(round(pos))))])
+
+    def comb(count):
+        return [full * k / count for k in range(1, count)]
+
+    detected = [b for _, b in spans[:-1]]  # interior cuts between frames
+    n = len(spans)
+    best_count, best_score = n, -1.0
+    for count in range(max(2, n - 2), n + 3):
+        cuts = comb(count)
+        score = sum(at(c) for c in cuts) / len(cuts)
+        # Break near-ties toward the detected count so a marginally-better comb
+        # never relabels a strip that was already segmented correctly.
+        score -= 0.01 * abs(count - n)
+        if score > best_score:
+            best_score, best_count = score, count
+
+    pitch = full / best_count
+    tolerance = pitch * 0.15
+
+    cuts = []
+    for predicted in comb(best_count):
+        near = [c for c in detected if abs(c - predicted) <= tolerance]
+        # Trust a real detected gutter; only predict where the detector found
+        # nothing on rhythm (a missing/weak dark-frame gutter).
+        cuts.append(min(near, key=lambda c: abs(c - predicted)) if near else int(round(predicted)))
+
+    bounds = [0] + sorted(cuts) + [full]
+    min_span = max(24, full // 18)
+    regular = [(a, b) for a, b in zip(bounds, bounds[1:]) if b - a >= min_span]
+    return regular if len(regular) >= 2 else spans
 
 
 def boxes_from_spans(gray, spans, lower, upper, axis, scale):
