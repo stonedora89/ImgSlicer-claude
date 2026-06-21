@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
+
+# Floor of the grain-suppression weight: a separator line sitting on image
+# content (incl. crushed-dark frames) keeps at most this fraction of its score.
+SUPPRESS_FLOOR = 0.15
 
 
 def fail(message):
@@ -342,6 +347,42 @@ def _photo_band(section, axis, centre):
     return start, end
 
 
+def grain_suppression(gray, reduce_axis):
+    """Per-line weight in [SUPPRESS_FLOOR, 1] that damps separator scores on
+    image content — including crushed-dark frames — while leaving true film
+    base (a flat gutter) at ~1.0.
+
+    Darkness alone cannot tell a black *gutter* from an underexposed black
+    *picture*: both read as "dark + uniform". A locally contrast-normalized
+    copy (CLAHE) breaks the tie — it amplifies the residual grain/edges that
+    live inside any photographed scene, even a crushed-dark one, while genuine
+    film base stays flat (≈0) because there is nothing there to amplify.
+
+    The weight is purely multiplicative and never below SUPPRESS_FLOOR, so it
+    can only *remove* false separators inside frames. It cannot create a new
+    cut, move a real edge (the cut position is still chosen from the original
+    profile + refine_slot), or raise a true gutter's score.
+    """
+    if os.environ.get("IMGSLICER_NO_GRAIN") == "1":
+        return 1.0
+
+    import cv2
+
+    g8 = gray if gray.dtype == np.uint8 else np.clip(gray, 0, 255).astype(np.uint8)
+    norm = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(g8).astype(float)
+    k = 7
+    mean = cv2.blur(norm, (k, k))
+    mean_sq = cv2.blur(norm * norm, (k, k))
+    local_std = np.sqrt(np.maximum(mean_sq - mean * mean, 0.0))
+
+    # Fraction of the perpendicular line that carries real texture after
+    # normalization. Film base stays flat (≈0); picture content — bright OR
+    # crushed-dark — lights up.
+    structured = (local_std > 8.0).mean(axis=reduce_axis)
+    excess = np.clip((structured - 0.10) / 0.30, 0.0, 1.0)
+    return 1.0 - (1.0 - SUPPRESS_FLOOR) * excess
+
+
 def separator_profile(gray, axis):
     """Per-line "separator-ness" in [0, 1] for the given split axis.
 
@@ -378,7 +419,13 @@ def separator_profile(gray, axis):
     #     for the uniformity test to catch.
     uniform_gutter = uniform * (0.30 + 0.70 * extreme)
     dark_line = dark * 1.9 + (edge_profile / edge_max) * 0.38
-    return np.clip(np.maximum(uniform_gutter, dark_line), 0.0, 1.0)
+    base = np.maximum(uniform_gutter, dark_line)
+
+    # Damp lines that sit on textured picture content (incl. crushed-dark
+    # frames) so an underexposed body is no longer mistaken for a gutter. Only
+    # suppresses — never adds or moves a separator. See grain_suppression().
+    base = base * grain_suppression(gray, reduce_axis)
+    return np.clip(base, 0.0, 1.0)
 
 
 def split_axis_by_separators(gray, axis):
