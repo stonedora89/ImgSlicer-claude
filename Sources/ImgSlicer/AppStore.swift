@@ -331,8 +331,8 @@ final class AppStore: ObservableObject {
            let candidate = tasks[indexes.task].photos[indexes.photo].cropCandidates.first(where: { $0.id == candidateID }) {
             tasks[indexes.task].photos[indexes.photo].cropRegions = candidate.adjustedRegions(settings: settings)
             editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
-            logMessage = "已按当前边距更新自动裁切框。"
-            logSubMessage = "\(candidate.title) · 上下左右边距已应用"
+            logMessage = "已按当前内收量更新自动裁切框。"
+            logSubMessage = "\(candidate.title) · 上下左右去黑边已应用"
             return
         }
 
@@ -343,10 +343,10 @@ final class AppStore: ObservableObject {
                 id: region.id,
                 index: region.index,
                 rect: region.rect.expanded(
-                    top: delta.top / 2000,
-                    bottom: delta.bottom / 2000,
-                    left: delta.left / 2000,
-                    right: delta.right / 2000
+                    top: -delta.top / 2000,
+                    bottom: -delta.bottom / 2000,
+                    left: -delta.left / 2000,
+                    right: -delta.right / 2000
                 ).normalizedCropRect,
                 angle: region.angle,
                 isManual: true
@@ -355,10 +355,10 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].photos[indexes.photo].isManual = true
         tasks[indexes.task].photos[indexes.photo].status = .manual
         tasks[indexes.task].status = .needsReview
-        tasks[indexes.task].detail = "已按边距微调当前裁切框"
+        tasks[indexes.task].detail = "已按内收量微调当前裁切框"
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
-        logMessage = "已按当前边距微调裁切框。"
+        logMessage = "已按当前内收量微调裁切框。"
         logSubMessage = "当前图已保存为手动调整结果"
     }
 
@@ -896,10 +896,10 @@ final class AppStore: ObservableObject {
 
     private func marginRect() -> CGRect {
         CGRect(
-            x: settings.left / 200,
-            y: settings.top / 200,
-            width: max(0.1, 1 - (settings.left + settings.right) / 200),
-            height: max(0.1, 1 - (settings.top + settings.bottom) / 200)
+            x: settings.left / 2000,
+            y: settings.top / 2000,
+            width: max(0.1, 1 - (settings.left + settings.right) / 2000),
+            height: max(0.1, 1 - (settings.top + settings.bottom) / 2000)
         ).normalizedCropRect
     }
 

@@ -3489,10 +3489,10 @@ struct ImageProcessor: Sendable {
 
     private func marginRect(_ settings: CropSettings) -> CGRect {
         CGRect(
-            x: settings.left / 200,
-            y: settings.top / 200,
-            width: max(0.1, 1 - (settings.left + settings.right) / 200),
-            height: max(0.1, 1 - (settings.top + settings.bottom) / 200)
+            x: settings.left / 2000,
+            y: settings.top / 2000,
+            width: max(0.1, 1 - (settings.left + settings.right) / 2000),
+            height: max(0.1, 1 - (settings.top + settings.bottom) / 2000)
         ).normalized
     }
 

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="ImgSlicer"
 APP_VERSION="0.35.12"
-APP_BUILD="47"
+APP_BUILD="48"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_NAME="$APP_NAME-$APP_VERSION-$APP_BUILD"
 RELEASE_DIR="$DIST_DIR/$RELEASE_NAME"

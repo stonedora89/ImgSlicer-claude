@@ -95,10 +95,10 @@ struct CropCandidate: Identifiable, Hashable, Sendable {
             CropRegion(
                 index: offset + 1,
                 rect: region.rect.expanded(
-                    top: settings.top * marginScale / 2000,
-                    bottom: settings.bottom * marginScale / 2000,
-                    left: settings.left * marginScale / 2000,
-                    right: settings.right * marginScale / 2000
+                    top: -settings.top * marginScale / 2000,
+                    bottom: -settings.bottom * marginScale / 2000,
+                    left: -settings.left * marginScale / 2000,
+                    right: -settings.right * marginScale / 2000
                 ),
                 angle: region.angle,
                 isManual: false
@@ -143,10 +143,10 @@ struct CropSettings: Sendable {
     var preprocessMode: ImagePreprocessMode = .original
     var algorithmMode: CropAlgorithmMode = .automatic
     var orientation: OrientationMode = .automatic
-    var top: Double = 0
-    var bottom: Double = 0
-    var left: Double = 0
-    var right: Double = 0
+    var top: Double = 2
+    var bottom: Double = 2
+    var left: Double = 2
+    var right: Double = 2
     var sensitivity: Double = 64
     var splitSensitivity: Double = 62
     var minimumRegionPercent: Double = 0.6

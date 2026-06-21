@@ -739,7 +739,6 @@ struct ViewerLog: View {
 
 struct ParameterPanel: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showMargins = false
 
     var body: some View {
         content
@@ -789,16 +788,20 @@ struct ParameterPanel: View {
                             AutoCandidatePicker()
                         }
                     }
-                    CollapsibleGroup("高级 · 边距微调", isExpanded: $showMargins) {
+                    SettingsGroup("边缘内收 · 去黑边") {
                         VStack(spacing: 10) {
                             if let reference = store.recognitionMarginReference {
                                 RecognitionMarginReferenceView(reference: reference)
                             }
+                            Text("识别四边后向画面内收；设为 0 px 可保留原始识别边界。")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(AppTheme.muted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                MarginField(title: "上边距", value: $store.settings.top)
-                                MarginField(title: "下边距", value: $store.settings.bottom)
-                                MarginField(title: "左边距", value: $store.settings.left)
-                                MarginField(title: "右边距", value: $store.settings.right)
+                                MarginField(title: "上内收", value: $store.settings.top)
+                                MarginField(title: "下内收", value: $store.settings.bottom)
+                                MarginField(title: "左内收", value: $store.settings.left)
+                                MarginField(title: "右内收", value: $store.settings.right)
                             }
                         }
                     }
