@@ -5,18 +5,23 @@ import UniformTypeIdentifiers
 struct AppShell: View {
     @EnvironmentObject private var store: AppStore
 
+    private enum Layout {
+        static let queuePanelWidth: CGFloat = 210
+        static let parameterPanelWidth: CGFloat = 238
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             TopBar()
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 QueuePanel()
-                    .frame(width: 292)
+                    .frame(width: Layout.queuePanelWidth)
                 PreviewWorkspace()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 ParameterPanel()
-                    .frame(width: 336)
+                    .frame(width: Layout.parameterPanelWidth)
             }
-            .padding(16)
+            .padding(12)
             .frame(maxHeight: .infinity)
             Filmstrip()
                 .frame(height: 132)
@@ -37,46 +42,6 @@ struct AppShell: View {
         .background { keyboardShortcutSinks }
         .onDrop(of: [.fileURL], isTargeted: $store.isDropTargeted) { providers in
             loadDroppedURLs(providers)
-        }
-        .alert(
-            "该图片有手动修正",
-            isPresented: Binding(
-                get: { store.manualRedetectPrompt != nil },
-                set: { if !$0 { store.manualRedetectPrompt = nil } }
-            ),
-            presenting: store.manualRedetectPrompt
-        ) { _ in
-            Button("重新识别（丢弃手动修正）", role: .destructive) {
-                store.confirmManualRedetect()
-            }
-            Button("保留手动修正", role: .cancel) {
-                store.manualRedetectPrompt = nil
-            }
-        } message: { prompt in
-            Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
-        }
-        .alert(
-            store.startProcessingPrompt?.title ?? "开始处理",
-            isPresented: Binding(
-                get: { store.startProcessingPrompt != nil },
-                set: { if !$0 { store.startProcessingPrompt = nil } }
-            ),
-            presenting: store.startProcessingPrompt
-        ) { prompt in
-            if prompt.canStart {
-                Button("开始处理 \(prompt.waitingCount) 个任务") {
-                    store.confirmStartProcessing()
-                }
-                Button("取消", role: .cancel) {
-                    store.startProcessingPrompt = nil
-                }
-            } else {
-                Button("知道了", role: .cancel) {
-                    store.startProcessingPrompt = nil
-                }
-            }
-        } message: { prompt in
-            Text(prompt.message)
         }
     }
 
@@ -209,7 +174,7 @@ struct QueuePanel: View {
                     Image(systemName: "eraser")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("清理所有任务（处理中的除外）")
+                .help("只清理勾选的任务")
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
@@ -221,7 +186,12 @@ struct QueuePanel: View {
                         EmptyQueueView()
                     } else {
                         ForEach(store.tasks) { task in
-                            FolderTaskRow(task: task, active: task.id == store.selectedTask?.id)
+                            FolderTaskRow(
+                                task: task,
+                                active: task.id == store.selectedTask?.id,
+                                checked: store.selectedTaskIDs.contains(task.id),
+                                queuedOrActive: store.isTaskActive(task.id)
+                            )
                                 .onTapGesture { store.selectTask(task.id) }
                         }
                     }
@@ -238,21 +208,33 @@ struct FolderTaskRow: View {
 
     let task: FolderTask
     let active: Bool
+    let checked: Bool
+    let queuedOrActive: Bool
 
     var body: some View {
         VStack(spacing: 9) {
             HStack(alignment: .top, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(task.status == .done ? AppTheme.green.opacity(0.18) : Color(red: 0.09, green: 0.1, blue: 0.12))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.14)))
-                    if task.status == .done {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(AppTheme.green)
+                Button {
+                    store.toggleTaskSelection(task.id)
+                } label: {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(checked ? AppTheme.orange.opacity(0.24) : task.status == .done ? AppTheme.green.opacity(0.18) : Color(red: 0.09, green: 0.1, blue: 0.12))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(checked ? AppTheme.orange.opacity(0.74) : Color.white.opacity(0.14)))
+                        if checked {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(AppTheme.orange)
+                        } else if task.status == .done {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(AppTheme.green)
+                        }
                     }
+                    .frame(width: 18, height: 18)
                 }
-                .frame(width: 18, height: 18)
+                .buttonStyle(.plain)
+                .help(checked ? "取消勾选" : "勾选用于启动或清理")
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(task.displayName)
@@ -265,7 +247,7 @@ struct FolderTaskRow: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    StatusLabel(status: task.status)
+                    StatusLabel(status: task.status, queuedOrActive: queuedOrActive)
                     Button {
                         store.openFolder(for: task.id)
                     } label: {
@@ -283,6 +265,7 @@ struct FolderTaskRow: View {
         .padding(12)
         .background(active ? AppTheme.orange.opacity(0.16) : Color(red: 0.115, green: 0.13, blue: 0.155))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 14))
         .overlay(alignment: .leading) {
             if active {
                 RoundedRectangle(cornerRadius: 3)
@@ -302,20 +285,22 @@ struct FolderTaskRow: View {
 
 struct StatusLabel: View {
     let status: TaskStatus
+    var queuedOrActive = false
 
     var color: Color {
+        if queuedOrActive { return AppTheme.blue }
         switch status {
-        case .waiting: Color(red: 0.82, green: 0.68, blue: 0.47)
-        case .running: Color(red: 0.72, green: 0.79, blue: 0.86)
-        case .needsReview: Color(red: 0.86, green: 0.68, blue: 0.43)
-        case .done: AppTheme.green
+        case .pending:
+            return Color(red: 0.82, green: 0.68, blue: 0.47)
+        case .done:
+            return AppTheme.green
         }
     }
 
     var body: some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(status.rawValue)
+            Text(queuedOrActive ? "执行中" : status.rawValue)
                 .font(.system(size: 11))
         }
         .foregroundStyle(color)
@@ -353,6 +338,7 @@ struct PreviewWorkspace: View {
                             ) { regionID, rect in
                                 store.updateSelectedCrop(regionID: regionID, rect: rect)
                             }
+                            .id(photo.id)
                         )
                     }
                     .padding(.horizontal, 68)
@@ -422,6 +408,9 @@ struct PhotoCanvas: View {
     let onSelect: (CropRegion.ID) -> Void
     let onDrawNewRegion: (CGRect) -> Void
     let onCropChange: (CropRegion.ID, CGRect) -> Void
+    @State private var zoomScale: CGFloat = 1
+    @State private var panOffset: CGSize = .zero
+    @State private var panGestureOrigin: CGSize?
 
     var body: some View {
         GeometryReader { proxy in
@@ -433,6 +422,8 @@ struct PhotoCanvas: View {
                     .clipped()
                     .shadow(color: .black.opacity(0.36), radius: 26, y: 18)
                     .frame(width: proxy.size.width, height: proxy.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(canvasPanGesture(in: proxy.size))
 
                 MultiCropOverlay(
                     regions: regions,
@@ -452,7 +443,62 @@ struct PhotoCanvas: View {
                         .offset(x: imageRect.minX, y: imageRect.minY)
                 }
             }
+            .scaleEffect(zoomScale, anchor: .center)
+            .offset(panOffset)
+            .background {
+                ScrollWheelMonitor { delta in
+                    updateZoom(by: delta, viewport: proxy.size)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if zoomScale > 1.001 {
+                    Text("\(Int((zoomScale * 100).rounded()))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(AppTheme.text)
+                        .padding(.horizontal, 8)
+                        .frame(height: 24)
+                        .background(Color.black.opacity(0.58))
+                        .clipShape(Capsule())
+                        .padding(10)
+                        .allowsHitTesting(false)
+                }
+            }
+            .clipped()
         }
+    }
+
+    private func canvasPanGesture(in viewport: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                guard zoomScale > 1.001, !isDrawing else { return }
+                let origin = panGestureOrigin ?? panOffset
+                panGestureOrigin = origin
+                panOffset = clampedPan(
+                    CGSize(width: origin.width + value.translation.width, height: origin.height + value.translation.height),
+                    viewport: viewport,
+                    zoom: zoomScale
+                )
+            }
+            .onEnded { _ in
+                panGestureOrigin = nil
+            }
+    }
+
+    private func updateZoom(by delta: CGFloat, viewport: CGSize) {
+        guard !isDrawing else { return }
+        let next = (zoomScale * exp(delta * 0.018)).clamped(to: 1...6)
+        zoomScale = next
+        panOffset = next <= 1.001 ? .zero : clampedPan(panOffset, viewport: viewport, zoom: next)
+        panGestureOrigin = nil
+    }
+
+    private func clampedPan(_ proposed: CGSize, viewport: CGSize, zoom: CGFloat) -> CGSize {
+        let maxX = max(0, viewport.width * (zoom - 1) / 2)
+        let maxY = max(0, viewport.height * (zoom - 1) / 2)
+        return CGSize(
+            width: proposed.width.clamped(to: -maxX...maxX),
+            height: proposed.height.clamped(to: -maxY...maxY)
+        )
     }
 
     private func aspectFitRect(imageSize: CGSize, bounds: CGSize) -> CGRect {
@@ -463,6 +509,57 @@ struct PhotoCanvas: View {
         let width = imageSize.width * scale
         let height = imageSize.height * scale
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
+    }
+}
+
+/// Observes wheel/trackpad scrolling without becoming a hit-test target, so
+/// crop-frame gestures keep receiving their normal mouse events.
+struct ScrollWheelMonitor: NSViewRepresentable {
+    let onScroll: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> ScrollWheelCaptureView {
+        let view = ScrollWheelCaptureView()
+        view.onScroll = onScroll
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollWheelCaptureView, context: Context) {
+        nsView.onScroll = onScroll
+    }
+
+    static func dismantleNSView(_ nsView: ScrollWheelCaptureView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+}
+
+final class ScrollWheelCaptureView: NSView {
+    var onScroll: ((CGFloat) -> Void)?
+    private var eventMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, let window = self.window, event.window === window else { return event }
+            let point = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(point) else { return event }
+            self.onScroll?(event.scrollingDeltaY)
+            return event
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func stopMonitoring() {
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
     }
 }
 
@@ -593,7 +690,7 @@ struct CropOverlay: View {
                     .fill(Color.clear)
                     .allowsHitTesting(false)
                 Rectangle()
-                    .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
+                    .stroke(activeColor.opacity(isSelected ? 0.95 : 0.72), lineWidth: isSelected ? 1.15 : 0.75)
                     .background(Rectangle().fill(Color.black.opacity(0.001)))
                     .frame(width: draw.width, height: draw.height)
                     .rotationEffect(.degrees(region.angle))
@@ -621,12 +718,12 @@ struct CropOverlay: View {
                 .help("删除裁切框")
 
                 ForEach(CropCorner.allCases) { corner in
-                    Circle()
-                        .fill(Color(red: 0.86, green: 0.91, blue: 0.96))
-                        .overlay(Circle().stroke(activeColor, lineWidth: isSelected ? 3 : 2))
-                        .frame(width: isSelected ? 16 : 14, height: isSelected ? 16 : 14)
+                    Color.clear
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                         .position(corner.point(in: draw))
                         .gesture(dragGesture(in: proxy.size, corner: corner))
+                        .help("拖动调整裁切边界")
                 }
             }
             .onChange(of: region.rect) { _, newValue in
@@ -751,6 +848,11 @@ struct ParameterPanel: View {
             .onChange(of: store.settings.preprocessMode) { _, _ in store.redetectSelectedPhoto() }
             .onChange(of: store.settings.algorithmMode) { _, _ in store.redetectSelectedPhoto() }
             .onChange(of: store.settings.orientation) { _, _ in store.redetectSelectedPhoto() }
+            .onChange(of: store.settings.outputColorSpace) { _, colorSpace in
+                if colorSpace == .customICC, store.settings.customICCProfileURL == nil {
+                    store.chooseCustomICCProfile()
+                }
+            }
     }
 
     private var content: some View {
@@ -775,7 +877,7 @@ struct ParameterPanel: View {
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.blue))
                     .disabled(store.selectedPhoto == nil)
-                    .help("重新识别：丢弃当前图片的历史框和候选，从原图重新生成自动效果")
+                    .help("重新识别当前图片：清除当前图旧框并重新运行算法；会参考同文件夹其他样图")
                 }
             }
             .padding(16)
@@ -786,6 +888,51 @@ struct ParameterPanel: View {
                     SettingsGroup("自动效果") {
                         VStack(spacing: 10) {
                             AutoCandidatePicker()
+                        }
+                    }
+                    SettingsGroup("输出格式") {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Picker("", selection: $store.settings.outputFormat) {
+                                ForEach(OutputFormat.allCases) { format in
+                                    Text(format.rawValue).tag(format)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+
+                            Text(store.settings.outputFormat.detail)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(AppTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    SettingsGroup("导出色彩空间") {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Picker("色彩空间", selection: $store.settings.outputColorSpace) {
+                                ForEach(OutputColorSpace.allCases) { colorSpace in
+                                    Text(colorSpace.rawValue).tag(colorSpace)
+                                }
+                            }
+                            .pickerStyle(.menu)
+
+                            if store.settings.outputColorSpace == .customICC {
+                                Button {
+                                    store.chooseCustomICCProfile()
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "doc.badge.gearshape")
+                                        Text(store.settings.customICCProfileURL?.lastPathComponent ?? "选择 ICC 文件")
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(PanelButtonStyle())
+                            }
+
+                            Text(colorSpaceDescription)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(AppTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     SettingsGroup("边缘内收 · 去黑边") {
@@ -819,6 +966,17 @@ struct ParameterPanel: View {
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(16)
             .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
+        }
+    }
+
+    private var colorSpaceDescription: String {
+        switch store.settings.outputColorSpace {
+        case .sRGB:
+            "转换并嵌入标准 sRGB 配置，适合屏幕和网络使用。"
+        case .adobeRGB:
+            "转换并嵌入 Adobe RGB (1998)，保留更宽的印刷色域。"
+        case .customICC:
+            "按所选 ICC 文件转换并嵌入输出图片。"
         }
     }
 }
@@ -955,7 +1113,7 @@ struct Filmstrip: View {
                 Spacer()
                 HStack(spacing: 6) {
                     Circle().fill(AppTheme.green).frame(width: 6, height: 6)
-                    Text("\(store.tasks.filter { $0.status == .running }.count) 个运行中 · \(store.tasks.filter { $0.status == .waiting }.count) 个等待")
+                    Text("\(store.tasks.filter { $0.status != .done }.count) 个待执行 · \(store.tasks.filter { $0.status == .done }.count) 个已完成")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
                 }
@@ -1217,15 +1375,31 @@ struct MarginField: View {
             Text(title)
                 .font(.system(size: 11))
                 .foregroundStyle(AppTheme.muted)
-            Stepper(value: $value, in: 0...80, step: 1) {
-                Text("\(Int(value)) px")
-                    .font(.system(size: 12))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 5) {
+                TextField("0", value: clampedValue, format: .number.precision(.fractionLength(0)))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: .infinity)
+                Text("px")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.muted)
             }
+            .padding(.horizontal, 7)
+            .frame(height: 27)
+            .background(Color.white.opacity(0.055))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .padding(10)
         .background(Color.black.opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var clampedValue: Binding<Double> {
+        Binding(
+            get: { value },
+            set: { value = $0.clamped(to: 0...80) }
+        )
     }
 }
 

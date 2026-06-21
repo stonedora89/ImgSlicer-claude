@@ -2,9 +2,7 @@ import Foundation
 import CoreGraphics
 
 enum TaskStatus: String, CaseIterable, Identifiable, Sendable {
-    case waiting = "等待中"
-    case running = "处理中"
-    case needsReview = "需确认"
+    case pending = "待执行"
     case done = "已完成"
 
     var id: String { rawValue }
@@ -24,6 +22,31 @@ enum OrientationMode: String, CaseIterable, Identifiable, Sendable {
     case automatic = "自动"
     case landscape = "横向"
     case portrait = "纵向"
+    var id: String { rawValue }
+}
+
+enum OutputFormat: String, CaseIterable, Identifiable, Sendable {
+    case jpeg = "JPG"
+    case tiff = "TIFF 16-bit"
+
+    var id: String { rawValue }
+    var fileExtension: String { self == .jpeg ? "jpg" : "tif" }
+
+    var detail: String {
+        switch self {
+        case .jpeg:
+            "最高质量（质量系数 1.0；JPEG 格式本身仍为有损编码）"
+        case .tiff:
+            "16-bit、无压缩，保留原始色彩空间"
+        }
+    }
+}
+
+enum OutputColorSpace: String, CaseIterable, Identifiable, Sendable {
+    case sRGB = "sRGB"
+    case adobeRGB = "Adobe RGB"
+    case customICC = "ICC 文件"
+
     var id: String { rawValue }
 }
 
@@ -121,7 +144,7 @@ struct FolderTask: Identifiable, Sendable {
     let displayName: String
     let imageCount: Int
     let folderCount: Int
-    var status: TaskStatus = .waiting
+    var status: TaskStatus = .pending
     var detail: String = "等待开始处理"
     var processedCount: Int = 0
     var photos: [PhotoItem]
@@ -143,6 +166,9 @@ struct CropSettings: Sendable {
     var preprocessMode: ImagePreprocessMode = .original
     var algorithmMode: CropAlgorithmMode = .automatic
     var orientation: OrientationMode = .automatic
+    var outputFormat: OutputFormat = .jpeg
+    var outputColorSpace: OutputColorSpace = .sRGB
+    var customICCProfileURL: URL?
     var top: Double = 2
     var bottom: Double = 2
     var left: Double = 2

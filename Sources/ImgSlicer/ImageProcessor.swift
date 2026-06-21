@@ -1,6 +1,8 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import Vision
 
 struct PhotoProcessResult: Sendable {
@@ -34,11 +36,13 @@ struct ImageProcessor: Sendable {
 
     func process(task: FolderTask, settings: CropSettings, sampleProfiles: [SampleProfile] = []) async -> [PhotoProcessResult] {
         var results: [PhotoProcessResult] = []
+        var nextSliceIndex = 1
         for photo in task.photos {
             if Task.isCancelled { break }
             autoreleasepool {
                 let regions = cropRegions(for: photo, settings: settings, sampleProfiles: sampleProfiles)
-                let outputs = writeCrops(photo: photo, task: task, regions: regions)
+                let outputs = writeCrops(photo: photo, regions: regions, startIndex: nextSliceIndex, settings: settings)
+                nextSliceIndex += regions.count
                 let failed = outputs.isEmpty
                 results.append(PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: photo.cropCandidates, outputURLs: outputs, failed: failed))
             }
@@ -870,16 +874,21 @@ struct ImageProcessor: Sendable {
         return indexedRegions(from: merged, settings: settings)
     }
 
-    private func writeCrops(photo: PhotoItem, task: FolderTask, regions: [CropRegion]) -> [URL] {
+    private func writeCrops(photo: PhotoItem, regions: [CropRegion], startIndex: Int, settings: CropSettings) -> [URL] {
         guard let image = NSImage(contentsOf: photo.url),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return [] }
 
         var outputs: [URL] = []
-        for (offset, region) in regions.enumerated() {
+        for (offset, region) in sortedForExport(regions).enumerated() {
             let crop = region.rect
             let cropped: CGImage?
             if abs(region.angle) > 0.05 {
-                cropped = rotatedCrop(cgImage, normalizedRect: crop, angleDegrees: region.angle)
+                cropped = rotatedCrop(
+                    cgImage,
+                    normalizedRect: crop,
+                    angleDegrees: region.angle,
+                    bitsPerComponent: settings.outputFormat == .tiff ? 16 : 8
+                )
             } else {
                 let pixelRect = CGRect(
                     x: crop.minX * Double(cgImage.width),
@@ -890,18 +899,31 @@ struct ImageProcessor: Sendable {
                 cropped = cgImage.cropping(to: pixelRect)
             }
             guard let cropped else { continue }
-            let outputURL = outputURL(for: photo, task: task, sliceIndex: offset + 1)
+            let outputURL = outputURL(for: photo, sliceIndex: startIndex + offset, format: settings.outputFormat)
             do {
                 try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let bitmap = NSBitmapImageRep(cgImage: cropped)
-                guard let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.94]) else { continue }
-                try data.write(to: outputURL, options: .atomic)
+                try writeImage(cropped, to: outputURL, settings: settings)
                 outputs.append(outputURL)
             } catch {
                 continue
             }
         }
         return outputs
+    }
+
+    private func sortedForExport(_ regions: [CropRegion]) -> [CropRegion] {
+        let rowTolerance = max(0.018, regions.map { Double($0.rect.height) }.average * 0.35)
+        return regions.sorted { lhs, rhs in
+            let lhsRect = lhs.rect.normalized
+            let rhsRect = rhs.rect.normalized
+            if abs(lhsRect.midY - rhsRect.midY) > rowTolerance {
+                return lhsRect.midY < rhsRect.midY
+            }
+            if abs(lhsRect.minX - rhsRect.minX) > 0.002 {
+                return lhsRect.minX < rhsRect.minX
+            }
+            return lhs.index < rhs.index
+        }
     }
 
     /// Estimates a frame's tilt (degrees, about its centre) by projection-profile
@@ -1001,7 +1023,12 @@ struct ImageProcessor: Sendable {
     /// Cuts out a tilted frame and rotates it upright. `normalizedRect` is the
     /// un-rotated box (0…1, top-left origin); `angleDegrees` is its tilt about
     /// the box centre. The output is the box's content, deskewed.
-    private func rotatedCrop(_ src: CGImage, normalizedRect rect: CGRect, angleDegrees: Double) -> CGImage? {
+    private func rotatedCrop(
+        _ src: CGImage,
+        normalizedRect rect: CGRect,
+        angleDegrees: Double,
+        bitsPerComponent: Int
+    ) -> CGImage? {
         let imgW = Double(src.width)
         let imgH = Double(src.height)
         let outW = max(1, Int((rect.width * imgW).rounded()))
@@ -1010,15 +1037,16 @@ struct ImageProcessor: Sendable {
         let cx = rect.midX * imgW
         let cy = (1.0 - rect.midY) * imgH
 
-        let colorSpace = src.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let colorSpace = rgbColorSpace(for: src)
+        let bitmapInfo = CGBitmapInfo.byteOrder16Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
         guard let ctx = CGContext(
             data: nil,
             width: outW,
             height: outH,
-            bitsPerComponent: 8,
+            bitsPerComponent: bitsPerComponent,
             bytesPerRow: 0,
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: bitsPerComponent == 16 ? bitmapInfo : CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
         ctx.interpolationQuality = .high
@@ -1031,12 +1059,88 @@ struct ImageProcessor: Sendable {
         return ctx.makeImage()
     }
 
-    private func outputURL(for photo: PhotoItem, task: FolderTask, sliceIndex: Int) -> URL {
-        let relativeParent = URL(fileURLWithPath: photo.relativePath).deletingLastPathComponent().path
-        let outputRoot = task.rootURL.deletingLastPathComponent().appendingPathComponent("\(task.rootURL.lastPathComponent)_ImgSlicer_Output", isDirectory: true)
-        let parent = relativeParent == "." ? outputRoot : outputRoot.appendingPathComponent(relativeParent, isDirectory: true)
-        let stem = photo.url.deletingPathExtension().lastPathComponent
-        return parent.appendingPathComponent("\(stem)_slice_\(String(format: "%02d", sliceIndex)).jpg")
+    private func writeImage(_ image: CGImage, to url: URL, settings: CropSettings) throws {
+        let format = settings.outputFormat
+        let destinationColorSpace = try outputColorSpace(settings: settings, fallback: image)
+        let outputImage: CGImage
+        let type: CFString
+        let properties: CFDictionary
+
+        switch format {
+        case .jpeg:
+            guard let converted = renderedImage(from: image, colorSpace: destinationColorSpace, bitsPerComponent: 8) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            outputImage = converted
+            type = UTType.jpeg.identifier as CFString
+            properties = [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary
+        case .tiff:
+            guard let promoted = renderedImage(from: image, colorSpace: destinationColorSpace, bitsPerComponent: 16) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            outputImage = promoted
+            type = UTType.tiff.identifier as CFString
+            properties = [
+                kCGImagePropertyTIFFDictionary: [
+                    kCGImagePropertyTIFFCompression: 1
+                ]
+            ] as CFDictionary
+        }
+
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(destination, outputImage, properties)
+        guard CGImageDestinationFinalize(destination) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private func renderedImage(from image: CGImage, colorSpace: CGColorSpace, bitsPerComponent: Int) -> CGImage? {
+        let bitmapInfo = bitsPerComponent == 16
+            ? CGBitmapInfo.byteOrder16Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+            : CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+        context.interpolationQuality = .none
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
+    }
+
+    private func outputColorSpace(settings: CropSettings, fallback image: CGImage) throws -> CGColorSpace {
+        switch settings.outputColorSpace {
+        case .sRGB:
+            return CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        case .adobeRGB:
+            return CGColorSpace(name: CGColorSpace.adobeRGB1998) ?? rgbColorSpace(for: image)
+        case .customICC:
+            guard let url = settings.customICCProfileURL,
+                  let data = try? Data(contentsOf: url),
+                  let colorSpace = CGColorSpace(iccData: data as CFData) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return colorSpace
+        }
+    }
+
+    private func rgbColorSpace(for image: CGImage) -> CGColorSpace {
+        guard let colorSpace = image.colorSpace, colorSpace.model == .rgb else {
+            return CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        }
+        return colorSpace
+    }
+
+    private func outputURL(for photo: PhotoItem, sliceIndex: Int, format: OutputFormat) -> URL {
+        let sourceFolder = photo.url.deletingLastPathComponent()
+        let outputFolder = sourceFolder.appendingPathComponent("\(sourceFolder.lastPathComponent)已分割", isDirectory: true)
+        return outputFolder.appendingPathComponent("\(String(format: "%02d", sliceIndex)).\(format.fileExtension)")
     }
 
     private func detectByProjectionSeparators(gray: [UInt8], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {

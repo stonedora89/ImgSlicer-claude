@@ -1,40 +1,23 @@
 import AppKit
+import CoreGraphics
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A staged re-detect awaiting the user's confirmation because it would
-/// discard the photo's manual corrections.
-struct ManualRedetectPrompt: Identifiable {
-    let id = UUID()
-    let photoName: String
-    let action: () -> Void
-}
-
-/// A snapshot of the queue shown before processing starts. Only waiting tasks
-/// are eligible; every other state is reported so the user knows what will be
-/// left untouched.
-struct StartProcessingPrompt: Identifiable {
-    let id = UUID()
-    let waitingCount: Int
-    let runningCount: Int
+/// A snapshot of the queue to run. Completed tasks are the only tasks skipped;
+/// every other task remains eligible to run.
+struct ProcessingSummary {
+    let targetTaskIDs: Set<FolderTask.ID>
+    let pendingCount: Int
     let doneCount: Int
-    let needsReviewCount: Int
 
-    var canStart: Bool { waitingCount > 0 }
-
-    var title: String {
-        canStart ? "有 \(waitingCount) 个任务可以开始" : "没有可开始的任务"
-    }
-
-    var message: String {
-        "等待处理：\(waitingCount) 个\n正在处理：\(runningCount) 个\n已完成：\(doneCount) 个\n需确认：\(needsReviewCount) 个\n\n本次只会启动“等待中”的任务；正在处理、已完成和需确认的任务不会重复处理。"
-    }
+    var canStart: Bool { pendingCount > 0 }
 }
 
 @MainActor
 final class AppStore: ObservableObject {
     @Published var tasks: [FolderTask] = []
     @Published var selectedTaskID: FolderTask.ID?
+    @Published var selectedTaskIDs = Set<FolderTask.ID>()
     @Published var selectedPhotoID: PhotoItem.ID?
     @Published var selectedCropRegionID: CropRegion.ID?
     @Published var isDrawingNewRegion = false
@@ -42,11 +25,7 @@ final class AppStore: ObservableObject {
     @Published var lastImportSummary: ImportSummary?
     @Published var isDropTargeted = false
     @Published var logMessage = "导入文件或文件夹后，系统会递归识别图片并建立独立任务。"
-    @Published var logSubMessage = "原图只读，输出写入新的 ImgSlicer_Output 目录。"
-    /// Set when a re-detect would discard a photo's manual corrections; the UI
-    /// shows a confirmation and only proceeds if the user accepts.
-    @Published var manualRedetectPrompt: ManualRedetectPrompt?
-    @Published var startProcessingPrompt: StartProcessingPrompt?
+    @Published var logSubMessage = "原图只读，输出写入原文件所在文件夹内的“文件夹名已分割”目录。"
 
     private let scanner = FolderScanner()
     private let processor = ImageProcessor()
@@ -54,10 +33,12 @@ final class AppStore: ObservableObject {
     private let sampleLibrary = SampleLibrary()
     private var processingTask: Task<Void, Never>?
     private var locatingTask: Task<Void, Never>?
+    private var activeProcessingTaskIDs = Set<FolderTask.ID>()
+    private var queuedProcessingTaskIDs = Set<FolderTask.ID>()
     private let maxConcurrentTasks = 3
     private let prefetchForwardCount = 10
     private let prefetchBackwardCount = 2
-    private var lastMarginValues = MarginValues()
+    private var appliedMarginsByPhoto: [PhotoItem.ID: MarginValues] = [:]
 
     var selectedTask: FolderTask? {
         guard let selectedTaskID else { return tasks.first }
@@ -144,19 +125,19 @@ final class AppStore: ObservableObject {
 
     func startProcessing() {
         saveCurrentPhotoIfNeeded()
-        startProcessingPrompt = processingSummary()
-    }
-
-    func confirmStartProcessing() {
         let summary = processingSummary()
-        startProcessingPrompt = nil
-        guard summary.canStart else { return }
+        guard summary.canStart else {
+            logMessage = selectedTaskIDs.isEmpty ? "没有可启动的待执行任务。" : "勾选的任务里没有可启动项。"
+            logSubMessage = summary.doneCount > 0 ? "已完成任务会跳过，避免重复输出。" : "请先导入图片或选择待执行任务。"
+            return
+        }
 
-        logMessage = "已安排 \(summary.waitingCount) 个等待中的任务开始处理。"
+        queuedProcessingTaskIDs.formUnion(summary.targetTaskIDs)
+        logMessage = "已安排 \(summary.pendingCount) 个待执行任务开始处理。"
         logSubMessage = skippedProcessingSummary(summary)
 
-        // A live queue will pick up any newly imported waiting tasks after its
-        // current batch. Never cancel it: doing so could strand running tasks.
+        // A live queue will pick up newly queued tasks after its current batch.
+        // Never cancel it: doing so could strand active tasks.
         guard processingTask == nil else { return }
         processingTask = Task { [weak self] in
             await self?.runQueue()
@@ -164,28 +145,65 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func processingSummary() -> StartProcessingPrompt {
-        StartProcessingPrompt(
-            waitingCount: tasks.count { $0.status == .waiting },
-            runningCount: tasks.count { $0.status == .running },
-            doneCount: tasks.count { $0.status == .done },
-            needsReviewCount: tasks.count { $0.status == .needsReview }
+    private func processingSummary() -> ProcessingSummary {
+        let targetTaskIDs = selectedTaskIDs.isEmpty
+            ? Set(tasks.map(\.id))
+            : selectedTaskIDs
+        return processingSummary(targetTaskIDs: targetTaskIDs)
+    }
+
+    private func processingSummary(targetTaskIDs: Set<FolderTask.ID>) -> ProcessingSummary {
+        ProcessingSummary(
+            targetTaskIDs: targetTaskIDs,
+            pendingCount: tasks.count { targetTaskIDs.contains($0.id) && $0.status != .done && !activeProcessingTaskIDs.contains($0.id) },
+            doneCount: tasks.count { targetTaskIDs.contains($0.id) && $0.status == .done }
         )
     }
 
-    private func skippedProcessingSummary(_ summary: StartProcessingPrompt) -> String {
-        "跳过 \(summary.runningCount) 个处理中、\(summary.doneCount) 个已完成、\(summary.needsReviewCount) 个需确认任务。"
+    private func skippedProcessingSummary(_ summary: ProcessingSummary) -> String {
+        summary.doneCount > 0 ? "跳过 \(summary.doneCount) 个已完成任务。" : "没有已完成任务被重复启动。"
     }
 
-    /// Clears every task except those currently being processed — a running
+    func toggleTaskSelection(_ taskID: FolderTask.ID) {
+        if selectedTaskIDs.contains(taskID) {
+            selectedTaskIDs.remove(taskID)
+        } else {
+            selectedTaskIDs.insert(taskID)
+        }
+    }
+
+    func isTaskActive(_ taskID: FolderTask.ID) -> Bool {
+        activeProcessingTaskIDs.contains(taskID) || queuedProcessingTaskIDs.contains(taskID)
+    }
+
+    /// Clears selected tasks except those currently being processed — an active
     /// task can't be removed because the queue is actively writing to it.
     func clearFinishedAndIdle() {
-        tasks.removeAll { $0.status != .running }
-        if selectedTask?.status != .running {
+        guard !selectedTaskIDs.isEmpty else {
+            logMessage = "请先勾选要清理的任务。"
+            logSubMessage = "左侧任务列表勾选后，再点击清理按钮。"
+            return
+        }
+
+        let removableIDs = selectedTaskIDs.subtracting(activeProcessingTaskIDs)
+        let skippedActiveCount = selectedTaskIDs.count - removableIDs.count
+        guard !removableIDs.isEmpty else {
+            logMessage = "已勾选的任务正在处理中，暂不能清理。"
+            logSubMessage = "等待输出完成后可再次清理。"
+            return
+        }
+
+        let removedCurrentTask = selectedTaskID.map { removableIDs.contains($0) } ?? true
+        tasks.removeAll { removableIDs.contains($0.id) }
+        queuedProcessingTaskIDs.subtract(removableIDs)
+        selectedTaskIDs.subtract(removableIDs)
+        if removedCurrentTask {
             selectedTaskID = tasks.first?.id
             selectedPhotoID = tasks.first?.photos.first?.id
             selectedCropRegionID = nil
         }
+        logMessage = "已清理 \(removableIDs.count) 个任务。"
+        logSubMessage = skippedActiveCount > 0 ? "另有 \(skippedActiveCount) 个正在处理的任务已保留。" : "只清理了你勾选的任务。"
     }
 
     func openFolder(for taskID: FolderTask.ID) {
@@ -205,6 +223,7 @@ final class AppStore: ObservableObject {
         selectedPhotoID = tasks.first(where: { $0.id == taskID })?.photos.first?.id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
+        applyInheritedMarginsToSelection()
     }
 
     func selectPhoto(_ photoID: PhotoItem.ID) {
@@ -212,6 +231,7 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photoID
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
+        applyInheritedMarginsToSelection()
     }
 
     func selectPreviousPhoto() {
@@ -223,6 +243,7 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photos[previousIndex].id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
+        applyInheritedMarginsToSelection()
     }
 
     func selectNextPhoto() {
@@ -234,6 +255,7 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photos[nextIndex].id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
+        applyInheritedMarginsToSelection()
     }
 
     func selectCropRegion(_ regionID: CropRegion.ID) {
@@ -248,8 +270,9 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].photos[indexes.photo].cropRegions[regionIndex].isManual = manual
         tasks[indexes.task].photos[indexes.photo].isManual = manual
         tasks[indexes.task].photos[indexes.photo].status = manual ? .manual : tasks[indexes.task].photos[indexes.photo].status
-        tasks[indexes.task].status = .needsReview
+        tasks[indexes.task].status = .pending
         tasks[indexes.task].detail = "已保存人工微调结果"
+        appliedMarginsByPhoto[tasks[indexes.task].photos[indexes.photo].id] = MarginValues(settings: settings)
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框，人工结果会优先保留。"
@@ -322,21 +345,25 @@ final class AppStore: ObservableObject {
         applyCandidate(candidate, taskIndex: indexes.task, photoIndex: indexes.photo)
     }
 
-    func reapplySelectedCandidateMargins() {
-        defer { lastMarginValues = MarginValues(settings: settings) }
+    func reapplySelectedCandidateMargins(reportFeedback: Bool = true) {
         guard let indexes = selectedIndexes() else { return }
+        let photoID = tasks[indexes.task].photos[indexes.photo].id
+        let currentMargins = MarginValues(settings: settings)
 
         if !tasks[indexes.task].photos[indexes.photo].isManual,
            let candidateID = tasks[indexes.task].photos[indexes.photo].selectedCandidateID,
            let candidate = tasks[indexes.task].photos[indexes.photo].cropCandidates.first(where: { $0.id == candidateID }) {
             tasks[indexes.task].photos[indexes.photo].cropRegions = candidate.adjustedRegions(settings: settings)
+            appliedMarginsByPhoto[photoID] = currentMargins
             editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
-            logMessage = "已按当前内收量更新自动裁切框。"
-            logSubMessage = "\(candidate.title) · 上下左右去黑边已应用"
+            if reportFeedback {
+                logMessage = "已按当前内收量更新自动裁切框。"
+                logSubMessage = "\(candidate.title) · 上下左右去黑边已应用"
+            }
             return
         }
 
-        let delta = MarginValues(settings: settings).delta(from: lastMarginValues)
+        let delta = currentMargins.delta(from: appliedMarginsByPhoto[photoID] ?? MarginValues())
         guard delta.hasChange else { return }
         tasks[indexes.task].photos[indexes.photo].cropRegions = tasks[indexes.task].photos[indexes.photo].cropRegions.map { region in
             CropRegion(
@@ -354,12 +381,44 @@ final class AppStore: ObservableObject {
         }
         tasks[indexes.task].photos[indexes.photo].isManual = true
         tasks[indexes.task].photos[indexes.photo].status = .manual
-        tasks[indexes.task].status = .needsReview
+        tasks[indexes.task].status = .pending
         tasks[indexes.task].detail = "已按内收量微调当前裁切框"
+        appliedMarginsByPhoto[photoID] = currentMargins
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
-        logMessage = "已按当前内收量微调裁切框。"
-        logSubMessage = "当前图已保存为手动调整结果"
+        if reportFeedback {
+            logMessage = "已按当前内收量微调裁切框。"
+            logSubMessage = "当前图已保存为手动调整结果"
+        }
+    }
+
+    private func applyInheritedMarginsToSelection() {
+        reapplySelectedCandidateMargins(reportFeedback: false)
+    }
+
+    func chooseCustomICCProfile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ["icc", "icm"].compactMap { UTType(filenameExtension: $0) }
+        panel.prompt = "选择 ICC"
+        panel.message = "选择用于导出颜色匹配的 ICC 或 ICM 配置文件"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            if settings.customICCProfileURL == nil { settings.outputColorSpace = .sRGB }
+            return
+        }
+        guard let data = try? Data(contentsOf: url), CGColorSpace(iccData: data as CFData) != nil else {
+            logMessage = "无法使用该 ICC 文件。"
+            logSubMessage = url.lastPathComponent
+            settings.outputColorSpace = .sRGB
+            return
+        }
+        settings.customICCProfileURL = url
+        settings.outputColorSpace = .customICC
+        logMessage = "已选择 ICC 配置文件。"
+        logSubMessage = url.lastPathComponent
     }
 
     func saveSelectedSampleProfile() {
@@ -377,30 +436,10 @@ final class AppStore: ObservableObject {
         logSubMessage = "同文件夹后续识别会优先参考宽高、比例、面积和边缘特征。"
     }
 
-    /// Re-detect the selected photo, but if it carries manual corrections, ask
-    /// first — re-detection replaces the hand-adjusted boxes with fresh
-    /// automatic ones, so it must never wipe a correction silently.
+    /// Re-detect only the selected photo. This intentionally replaces any
+    /// hand-adjusted boxes immediately; the wand is an explicit reset action.
     func redetectSelectedPhoto() {
-        guardingManualCorrections { [weak self] in self?.performRedetectSelectedPhoto() }
-    }
-
-    /// Run `action` immediately unless the selected photo is manually corrected,
-    /// in which case stage a confirmation prompt instead.
-    private func guardingManualCorrections(_ action: @escaping () -> Void) {
-        guard let indexes = selectedIndexes(),
-              tasks[indexes.task].photos[indexes.photo].isManual else {
-            action()
-            return
-        }
-        let name = tasks[indexes.task].photos[indexes.photo].name
-        manualRedetectPrompt = ManualRedetectPrompt(photoName: name, action: action)
-    }
-
-    /// Confirm a staged re-detect, discarding the manual corrections.
-    func confirmManualRedetect() {
-        let action = manualRedetectPrompt?.action
-        manualRedetectPrompt = nil
-        action?()
+        performRedetectSelectedPhoto()
     }
 
     private func performRedetectSelectedPhoto() {
@@ -430,7 +469,7 @@ final class AppStore: ObservableObject {
         selectedCropRegionID = nil
         tasks[indexes.task].detail = "正在重新识别当前图片"
         logMessage = "正在重新生成自动效果。"
-        logSubMessage = tasks[indexes.task].photos[indexes.photo].name
+        logSubMessage = "仅处理 \(tasks[indexes.task].photos[indexes.photo].name)；参考同文件夹其他样图"
 
         Task { [weak self, processor, currentSettings, photoURL, taskID, photoID, sampleProfiles] in
             let candidates = await Task.detached {
@@ -543,7 +582,7 @@ final class AppStore: ObservableObject {
                     updateTaskFromLocator(taskIndex: job.taskIndex, photoURL: result.photoURL, regions: result.regions, candidates: result.candidates)
                 }
             }
-            if tasks.indices.contains(job.taskIndex), tasks[job.taskIndex].status == .waiting {
+            if tasks.indices.contains(job.taskIndex), tasks[job.taskIndex].status == .pending {
                 let remaining = tasks[job.taskIndex].photos.filter { $0.status == .pending || $0.status == .locating }.count
                 tasks[job.taskIndex].detail = remaining == 0 ? "已完成全部预识别，等待开始处理" : "已预识别，剩余 \(remaining) 张后台继续"
             }
@@ -608,20 +647,25 @@ final class AppStore: ObservableObject {
     }
 
     private func runQueue() async {
-        for index in tasks.indices where tasks[index].status == .waiting {
+        for index in tasks.indices where queuedProcessingTaskIDs.contains(tasks[index].id) && tasks[index].status != .done && !activeProcessingTaskIDs.contains(tasks[index].id) {
             tasks[index].detail = "等待空闲处理槽位"
         }
 
         while !Task.isCancelled {
-            // Re-read the queue between batches so waiting tasks imported while
+            // Re-read the queue between batches so pending tasks imported while
             // processing is underway can join without restarting the queue.
-            let pending = tasks.indices.filter { tasks[$0].status == .waiting }
+            let pending = tasks.indices.filter {
+                queuedProcessingTaskIDs.contains(tasks[$0].id)
+                    && tasks[$0].status != .done
+                    && !activeProcessingTaskIDs.contains(tasks[$0].id)
+            }
             guard !pending.isEmpty else { break }
             let batch = Array(pending.prefix(maxConcurrentTasks))
             let currentSettings = settings
             let jobs: [(Int, FolderTask, [SampleProfile])] = batch.map { index in
                 let task = tasks[index]
-                tasks[index].status = .running
+                queuedProcessingTaskIDs.remove(task.id)
+                activeProcessingTaskIDs.insert(task.id)
                 tasks[index].detail = "后台自动识别与输出"
                 return (index, task, sampleLibrary.load(rootURL: task.rootURL))
             }
@@ -648,12 +692,17 @@ final class AppStore: ObservableObject {
                         )
                     }
                     if let index = tasks.firstIndex(where: { $0.id == taskID }) {
-                        tasks[index].status = tasks[index].photos.contains(where: { $0.status == .failed }) ? .needsReview : .done
-                        tasks[index].detail = tasks[index].status == .done ? "已输出完成" : "部分图片需人工确认"
+                        let hasFailedPhotos = tasks[index].photos.contains { $0.status == .failed }
+                        tasks[index].status = hasFailedPhotos ? .pending : .done
+                        tasks[index].detail = hasFailedPhotos ? "部分图片需人工确认，待再次执行" : "已输出完成"
                     }
+                    activeProcessingTaskIDs.remove(taskID)
                 }
             }
         }
+        queuedProcessingTaskIDs = Set(queuedProcessingTaskIDs.filter { taskID in
+            tasks.contains { $0.id == taskID && $0.status != .done }
+        })
     }
 
     private func updateTaskFromProcessor(taskIndex: Int, photoURL: URL, regions: [CropRegion], candidates: [CropCandidate], outputs: [URL], failed: Bool) {
@@ -710,6 +759,7 @@ final class AppStore: ObservableObject {
 
     private func applyCandidate(_ candidate: CropCandidate, taskIndex: Int, photoIndex: Int) {
         tasks[taskIndex].photos[photoIndex].cropRegions = candidate.adjustedRegions(settings: settings)
+        appliedMarginsByPhoto[tasks[taskIndex].photos[photoIndex].id] = MarginValues(settings: settings)
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = candidate.id
         selectedCropRegionID = tasks[taskIndex].photos[photoIndex].cropRegions.first?.id
         tasks[taskIndex].photos[photoIndex].isManual = false
@@ -756,7 +806,7 @@ final class AppStore: ObservableObject {
         tasks[taskIndex].photos[photoIndex].isManual = true
         tasks[taskIndex].photos[photoIndex].status = .manual
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = nil
-        tasks[taskIndex].status = .needsReview
+        tasks[taskIndex].status = .pending
         tasks[taskIndex].detail = "已按标准框校准当前画布"
         editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
         saveSampleProfileIfPossible(taskIndex: taskIndex, photoIndex: photoIndex)
@@ -841,8 +891,9 @@ final class AppStore: ObservableObject {
         tasks[taskIndex].photos[photoIndex].isManual = true
         tasks[taskIndex].photos[photoIndex].status = .manual
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = nil
-        tasks[taskIndex].status = .needsReview
+        tasks[taskIndex].status = .pending
         tasks[taskIndex].detail = detail
+        appliedMarginsByPhoto[tasks[taskIndex].photos[photoIndex].id] = MarginValues(settings: settings)
         editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
         saveSampleProfileIfPossible(taskIndex: taskIndex, photoIndex: photoIndex)
     }
@@ -918,9 +969,8 @@ final class AppStore: ObservableObject {
     }
 
     private func outputFolderURL(for task: FolderTask) -> URL {
-        task.rootURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("\(task.rootURL.lastPathComponent)_ImgSlicer_Output", isDirectory: true)
+        let sourceFolder = task.photos.first?.url.deletingLastPathComponent() ?? task.rootURL
+        return sourceFolder.appendingPathComponent("\(sourceFolder.lastPathComponent)已分割", isDirectory: true)
     }
 }
 
