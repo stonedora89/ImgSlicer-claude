@@ -213,13 +213,24 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
+                // For a left/right edge with NO pixel evidence (reliability ~0 —
+                // a dark subject with no detectable gutter), fall back to the
+                // strip's regular grid position. Strictly gated: only no-evidence
+                // edges that also break the rhythm are moved; edges the snap
+                // locked onto real gutters are never overridden.
+                let evidenced = gridFallbackUnreliableEdges(
+                    regions: snapped,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
                 // Tilt estimation is the costly part, so only run it for the
                 // top-ranked candidate (the one shown/output by default).
                 let estimateTilt = candidateOffset == 0
                 return CropCandidate(
                     title: candidate.title,
                     detail: candidate.detail,
-                    regions: snapped.enumerated().map {
+                    regions: evidenced.enumerated().map {
                         let rect = $0.element.rect.normalized
                         let angle = (estimateTilt && !$0.element.isManual) ? estimateRegionTilt(
                             gray: fullGray.bytes, width: fullGray.width, height: fullGray.height, rect: rect
@@ -1139,6 +1150,68 @@ struct ImageProcessor: Sendable {
     /// edge snap had no clean gutter to lock onto) — is replaced by its grid
     /// prediction. Conservative: it only fires on a clearly single-row strip
     /// where most frames already agree, and only moves the outliers.
+    /// Last-resort placement for an edge with NO pixel evidence: when a left or
+    /// right edge's reliability is ~0 (a dark subject with no detectable gutter,
+    /// where the snap had nothing to lock onto), put it at the strip's regular
+    /// grid position. The consensus idea applied safely — it ONLY moves edges
+    /// the reliability flags as evidence-free that ALSO break the rhythm, so an
+    /// edge snapped to a real gutter is never overridden. Top/bottom are left
+    /// alone (low reliability there is tilt, not a placement error).
+    private func gridFallbackUnreliableEdges(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count >= 4 else { return regions }
+        let rel = edgeReliabilities(regions: regions, gray: gray, width: width, height: height)
+        guard rel.count == regions.count else { return regions }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let order = regions.indices.sorted { regions[$0].rect.normalized.midX < regions[$1].rect.normalized.midX }
+        let rects = order.map { regions[$0].rect.normalized }
+
+        // Single-row gate.
+        let heights = rects.map { Double($0.height) }
+        guard let hMin = heights.min(), let hMax = heights.max(), hMin > 0, hMax / hMin < 1.4 else { return regions }
+        let centreYs = rects.map { Double($0.midY) }
+        let meanY = centreYs.reduce(0, +) / Double(centreYs.count)
+        let stdY = (centreYs.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centreYs.count)).squareRoot()
+        guard stdY < median(heights) * 0.15 else { return regions }
+
+        let widths = rects.map { Double($0.width) }
+        let centres = rects.map { Double($0.midX) }
+        let medianW = median(widths)
+        guard medianW > 0.02 else { return regions }
+        let gaps = zip(centres.dropFirst(), centres).map { $0 - $1 }
+        guard !gaps.isEmpty else { return regions }
+        let pitch = median(gaps)
+        guard pitch > medianW * 0.5 else { return regions }
+        let residuals = centres.enumerated().map { $0.element - Double($0.offset) * pitch }
+        let anchor = median(residuals)
+        func predictedCentre(_ i: Int) -> Double { anchor + Double(i) * pitch }
+
+        // Trust the grid only if it's a regular strip: most frames already sit
+        // near the median width. (Width consistency is a steadier "is this a
+        // regular roll" signal than per-edge reliability, which runs low on
+        // right edges even when the layout is regular.)
+        let consistentFrames = widths.filter { $0 >= medianW * 0.75 && $0 <= medianW * 1.3 }.count
+        guard consistentFrames >= regions.count - 1 else { return regions }
+
+        let relThresh = 0.12
+        let minDeviation = medianW * 0.10
+
+        var output = regions
+        for (sortedIdx, origIdx) in order.enumerated() {
+            let r = rects[sortedIdx]
+            var left = Double(r.minX), right = Double(r.maxX)
+            let predL = predictedCentre(sortedIdx) - medianW / 2
+            let predR = predictedCentre(sortedIdx) + medianW / 2
+            var changed = false
+            if rel[origIdx][0] <= relThresh, abs(left - predL) > minDeviation { left = max(0, predL); changed = true }
+            if rel[origIdx][1] <= relThresh, abs(right - predR) > minDeviation { right = min(1, predR); changed = true }
+            guard changed, right - left > 0.02 else { continue }
+            let newRect = CGRect(x: left, y: r.minY, width: right - left, height: r.height).normalized
+            output[origIdx] = CropRegion(index: regions[origIdx].index, rect: newRect, angle: regions[origIdx].angle, isManual: regions[origIdx].isManual)
+        }
+        return output
+    }
+
     private func regularizeStripGrid(_ regions: [CropRegion]) -> [CropRegion] {
         guard regions.count >= 3 else { return regions }
         let sorted = regions.enumerated().sorted { $0.element.rect.normalized.midX < $1.element.rect.normalized.midX }
@@ -1219,7 +1292,11 @@ struct ImageProcessor: Sendable {
     /// to reconstruct from the template.
     func edgeReliabilities(regions: [CropRegion], cgImage: CGImage) -> [[Double]] {
         guard let g = fullResolutionGray(cgImage: cgImage) else { return regions.map { _ in [0, 0, 0, 0] } }
-        let gray = g.bytes, W = g.width, H = g.height
+        return edgeReliabilities(regions: regions, gray: g.bytes, width: g.width, height: g.height)
+    }
+
+    func edgeReliabilities(regions: [CropRegion], gray: [UInt8], width W: Int, height H: Int) -> [[Double]] {
+        guard W > 8, H > 8, gray.count >= W * H else { return regions.map { _ in [0, 0, 0, 0] } }
         let lut = ImageProcessor.shadowLiftLUT
         let textureMin = 22.0, darkMax = 70.0, brightMin = 215.0, rawFlatMax = 12.0
 
