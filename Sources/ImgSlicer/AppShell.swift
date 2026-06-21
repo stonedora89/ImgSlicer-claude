@@ -770,13 +770,13 @@ struct ParameterPanel: View {
                     .help("框选新增：点亮后在预览图上拖出一个新的裁切框（Esc 取消）")
 
                     Button {
-                        store.smartRedetectSelectedPhoto()
+                        store.redetectSelectedPhoto()
                     } label: {
                         Image(systemName: "wand.and.stars")
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.blue))
                     .disabled(store.selectedPhoto == nil)
-                    .help("智能重识别：有选中参考框时按实例重识别当前画布，否则重新生成自动候选效果")
+                    .help("重新识别：丢弃当前图片的历史框和候选，从原图重新生成自动效果")
                 }
             }
             .padding(16)

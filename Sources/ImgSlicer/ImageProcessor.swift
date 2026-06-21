@@ -909,7 +909,9 @@ struct ImageProcessor: Sendable {
     /// column projections when the sampling axes line up with them, so we sweep a
     /// small angle range and keep the angle that maximises that crispness. Returns
     /// 0 unless a tilt is clearly better than straight, so square frames stay put.
-    private func estimateRegionTilt(gray: [UInt8], width: Int, height: Int, rect: CGRect) -> Double {
+    // Internal so the validation test target can exercise the production
+    // estimator directly.
+    func estimateRegionTilt(gray: [UInt8], width: Int, height: Int, rect: CGRect) -> Double {
         let x0 = Int((rect.minX * Double(width)).rounded())
         let y0 = Int((rect.minY * Double(height)).rounded())
         let bw = Int((rect.width * Double(width)).rounded())
@@ -931,11 +933,31 @@ struct ImageProcessor: Sendable {
             }
         }
 
+        // A tilt estimate needs actual edges. Without this guard, a uniform
+        // frame or a smooth exposure gradient can win solely because rotated
+        // projection bins contain different numbers of pixels.
+        var strongEdgeCount = 0
+        let edgeThreshold = 12.0
+        for y in 0..<sh {
+            for x in 0..<sw {
+                let value = buf[y * sw + x]
+                if x > 0, abs(value - buf[y * sw + x - 1]) >= edgeThreshold {
+                    strongEdgeCount += 1
+                }
+                if y > 0, abs(value - buf[(y - 1) * sw + x]) >= edgeThreshold {
+                    strongEdgeCount += 1
+                }
+            }
+        }
+        guard strongEdgeCount >= max(8, (sw + sh) / 4) else { return 0 }
+
         let cxF = Double(sw) / 2, cyF = Double(sh) / 2
         func sharpness(_ angle: Double) -> Double {
             let s = sin(angle), c = cos(angle)
             var rows = [Double](repeating: 0, count: sh)
             var cols = [Double](repeating: 0, count: sw)
+            var rowCounts = [Int](repeating: 0, count: sh)
+            var colCounts = [Int](repeating: 0, count: sw)
             for y in 0..<sh {
                 let dy = Double(y) - cyF
                 for x in 0..<sw {
@@ -943,16 +965,22 @@ struct ImageProcessor: Sendable {
                     let v = buf[y * sw + x]
                     let r = Int((dx * s + dy * c + cyF).rounded())
                     let k = Int((dx * c - dy * s + cxF).rounded())
-                    if r >= 0, r < sh { rows[r] += v }
-                    if k >= 0, k < sw { cols[k] += v }
+                    if r >= 0, r < sh { rows[r] += v; rowCounts[r] += 1 }
+                    if k >= 0, k < sw { cols[k] += v; colCounts[k] += 1 }
                 }
             }
-            func crisp(_ p: [Double]) -> Double {
+            for i in rows.indices where rowCounts[i] > 0 { rows[i] /= Double(rowCounts[i]) }
+            for i in cols.indices where colCounts[i] > 0 { cols[i] /= Double(colCounts[i]) }
+
+            func crisp(_ p: [Double], counts: [Int]) -> Double {
                 var sum = 0.0
-                for i in 1..<p.count { let d = p[i] - p[i - 1]; sum += d * d }
+                for i in 1..<p.count where counts[i] > 0 && counts[i - 1] > 0 {
+                    let d = p[i] - p[i - 1]
+                    sum += d * d
+                }
                 return sum
             }
-            return crisp(rows) + crisp(cols)
+            return crisp(rows, counts: rowCounts) + crisp(cols, counts: colCounts)
         }
 
         let base = sharpness(0)

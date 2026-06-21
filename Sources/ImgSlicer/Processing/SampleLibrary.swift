@@ -44,6 +44,17 @@ struct SampleLibrary: Sendable {
         write(library: library, rootURL: rootURL)
     }
 
+    /// Forget learning derived from one photo while preserving samples learned
+    /// from the rest of the folder. This makes an explicit re-detect independent
+    /// of the very correction the user asked to discard.
+    func removeProfiles(sourceName: String, rootURL: URL) {
+        var library = SavedSampleLibrary(profiles: load(rootURL: rootURL))
+        let oldCount = library.profiles.count
+        library.profiles.removeAll { $0.sourceName == sourceName }
+        guard library.profiles.count != oldCount else { return }
+        write(library: library, rootURL: rootURL)
+    }
+
     func makeProfile(photo: PhotoItem, layout: CropBusinessProfile) -> SampleProfile? {
         let regions = photo.cropRegions
             .map { $0.rect.normalizedCropRect }

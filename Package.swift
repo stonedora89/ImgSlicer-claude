@@ -21,6 +21,10 @@ let package = Package(
                 .linkedFramework("UniformTypeIdentifiers"),
                 .linkedFramework("Vision")
             ]
+        ),
+        .testTarget(
+            name: "ImgSlicerTests",
+            dependencies: ["ImgSlicer"]
         )
     ]
 )

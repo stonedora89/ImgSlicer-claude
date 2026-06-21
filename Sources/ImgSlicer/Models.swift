@@ -100,6 +100,7 @@ struct CropCandidate: Identifiable, Hashable, Sendable {
                     left: settings.left * marginScale / 2000,
                     right: settings.right * marginScale / 2000
                 ),
+                angle: region.angle,
                 isManual: false
             )
         }

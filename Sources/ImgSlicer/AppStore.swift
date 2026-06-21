@@ -348,6 +348,7 @@ final class AppStore: ObservableObject {
                     left: delta.left / 2000,
                     right: delta.right / 2000
                 ).normalizedCropRect,
+                angle: region.angle,
                 isManual: true
             )
         }
@@ -404,13 +405,29 @@ final class AppStore: ObservableObject {
 
     private func performRedetectSelectedPhoto() {
         guard let indexes = selectedIndexes() else { return }
-        let photoURL = tasks[indexes.task].photos[indexes.photo].url
+        locatingTask?.cancel()
+        locatingTask = nil
+
+        let photo = tasks[indexes.task].photos[indexes.photo]
+        let photoURL = photo.url
         let taskID = tasks[indexes.task].id
-        let photoID = tasks[indexes.task].photos[indexes.photo].id
+        let photoID = photo.id
+        let rootURL = tasks[indexes.task].rootURL
         let currentSettings = settings
-        let sampleProfiles = sampleLibrary.load(rootURL: tasks[indexes.task].rootURL)
+
+        // "Re-detect" is a hard reset for this photo: remove both its persisted
+        // crop cache and any learning profile derived from its previous boxes.
+        // Other photos' samples remain available as folder-level guidance.
+        editStore.remove(photoRelativePath: photo.relativePath, rootURL: rootURL)
+        sampleLibrary.removeProfiles(sourceName: photo.name, rootURL: rootURL)
+        let sampleProfiles = sampleLibrary.load(rootURL: rootURL)
+
+        tasks[indexes.task].photos[indexes.photo].cropRegions = []
+        tasks[indexes.task].photos[indexes.photo].cropCandidates = []
+        tasks[indexes.task].photos[indexes.photo].selectedCandidateID = nil
         tasks[indexes.task].photos[indexes.photo].status = .locating
         tasks[indexes.task].photos[indexes.photo].isManual = false
+        selectedCropRegionID = nil
         tasks[indexes.task].detail = "正在重新识别当前图片"
         logMessage = "正在重新生成自动效果。"
         logSubMessage = tasks[indexes.task].photos[indexes.photo].name
@@ -845,7 +862,7 @@ final class AppStore: ObservableObject {
             }
             .enumerated()
             .map { offset, region in
-                CropRegion(index: offset + 1, rect: region.rect.normalizedCropRect, isManual: true)
+                CropRegion(index: offset + 1, rect: region.rect.normalizedCropRect, angle: region.angle, isManual: true)
             }
     }
 

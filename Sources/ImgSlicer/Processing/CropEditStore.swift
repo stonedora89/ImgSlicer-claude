@@ -45,6 +45,15 @@ struct CropEditStore: Sendable {
         write(edits: edits, rootURL: task.rootURL)
     }
 
+    /// Remove only this photo's cached crop state. Explicit re-detection uses
+    /// this before reading the source image so a later import cannot resurrect
+    /// the discarded manual/automatic boxes.
+    func remove(photoRelativePath: String, rootURL: URL) {
+        var edits = loadEdits(rootURL: rootURL)
+        guard edits.photos.removeValue(forKey: photoRelativePath) != nil else { return }
+        write(edits: edits, rootURL: rootURL)
+    }
+
     private func loadEdits(rootURL: URL) -> SavedCropEdits {
         let url = editsURL(rootURL: rootURL)
         guard let data = try? Data(contentsOf: url) else {
