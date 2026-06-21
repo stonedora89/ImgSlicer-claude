@@ -96,10 +96,18 @@ struct ExternalDetector: Sendable {
             }
         }
 
-        let bundledCandidates = [
-            Bundle.main.resourceURL?.appendingPathComponent("detectors/opencv_detector.py"),
-            Bundle.module.url(forResource: "opencv_detector", withExtension: "py", subdirectory: "detectors"),
+        var bundledCandidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("detectors/opencv_detector.py")
         ].compactMap { $0 }
+#if SWIFT_PACKAGE
+        if let packageScript = Bundle.module.url(
+            forResource: "opencv_detector",
+            withExtension: "py",
+            subdirectory: "detectors"
+        ) {
+            bundledCandidates.append(packageScript)
+        }
+#endif
         if let bundled = bundledCandidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
             return bundled
         }

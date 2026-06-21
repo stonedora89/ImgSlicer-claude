@@ -85,8 +85,8 @@ struct FolderScanner {
     }
 
     private func relativePath(from root: URL, to file: URL) -> String {
-        let rootPath = root.path(percentEncoded: false)
-        let filePath = file.path(percentEncoded: false)
+        let rootPath = root.path
+        let filePath = file.path
         guard filePath.hasPrefix(rootPath) else { return file.lastPathComponent }
         return String(filePath.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }

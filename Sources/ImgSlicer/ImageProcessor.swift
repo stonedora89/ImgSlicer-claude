@@ -15,6 +15,7 @@ struct ImageProcessor: Sendable {
     private let detectionPipeline = CropDetectionPipeline()
     private let processingPolicy = ProcessingPolicy()
 
+#if !IMGSLICER_MOJAVE
     func locate(photos: [PhotoItem], settings: CropSettings, sampleProfiles: [SampleProfile] = []) async -> [PhotoProcessResult] {
         var results: [PhotoProcessResult] = []
         for photo in photos where !photo.isManual {
@@ -45,6 +46,36 @@ struct ImageProcessor: Sendable {
         }
         return results
     }
+#else
+    /// Synchronous entry points for the AppKit Mojave build. Swift concurrency
+    /// cannot be deployed to macOS 10.14, while the underlying detector and
+    /// crop writer are already synchronous.
+    func locateSynchronously(photos: [PhotoItem], settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [PhotoProcessResult] {
+        photos.filter { !$0.isManual }.map { photo in
+            autoreleasepool {
+                let candidates = detectCropCandidates(for: photo.url, settings: settings, sampleProfiles: sampleProfiles)
+                let regions = preferredRegions(from: candidates, settings: settings)
+                return PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: candidates, outputURLs: [], failed: false)
+            }
+        }
+    }
+
+    func processSynchronously(task: FolderTask, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [PhotoProcessResult] {
+        task.photos.map { photo in
+            autoreleasepool {
+                let regions = cropRegions(for: photo, settings: settings, sampleProfiles: sampleProfiles)
+                let outputs = writeCrops(photo: photo, task: task, regions: regions)
+                return PhotoProcessResult(
+                    photoURL: photo.url,
+                    regions: regions,
+                    candidates: photo.cropCandidates,
+                    outputURLs: outputs,
+                    failed: outputs.isEmpty
+                )
+            }
+        }
+    }
+#endif
 
     private func cropRegions(for photo: PhotoItem, settings: CropSettings, sampleProfiles: [SampleProfile]) -> [CropRegion] {
         if photo.isManual || processingPolicy.shouldReuseLocatedRegions(for: photo) {
