@@ -10,6 +10,27 @@ struct ManualRedetectPrompt: Identifiable {
     let action: () -> Void
 }
 
+/// A snapshot of the queue shown before processing starts. Only waiting tasks
+/// are eligible; every other state is reported so the user knows what will be
+/// left untouched.
+struct StartProcessingPrompt: Identifiable {
+    let id = UUID()
+    let waitingCount: Int
+    let runningCount: Int
+    let doneCount: Int
+    let needsReviewCount: Int
+
+    var canStart: Bool { waitingCount > 0 }
+
+    var title: String {
+        canStart ? "有 \(waitingCount) 个任务可以开始" : "没有可开始的任务"
+    }
+
+    var message: String {
+        "等待处理：\(waitingCount) 个\n正在处理：\(runningCount) 个\n已完成：\(doneCount) 个\n需确认：\(needsReviewCount) 个\n\n本次只会启动“等待中”的任务；正在处理、已完成和需确认的任务不会重复处理。"
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published var tasks: [FolderTask] = []
@@ -25,6 +46,7 @@ final class AppStore: ObservableObject {
     /// Set when a re-detect would discard a photo's manual corrections; the UI
     /// shows a confirmation and only proceeds if the user accepts.
     @Published var manualRedetectPrompt: ManualRedetectPrompt?
+    @Published var startProcessingPrompt: StartProcessingPrompt?
 
     private let scanner = FolderScanner()
     private let processor = ImageProcessor()
@@ -122,10 +144,37 @@ final class AppStore: ObservableObject {
 
     func startProcessing() {
         saveCurrentPhotoIfNeeded()
-        processingTask?.cancel()
+        startProcessingPrompt = processingSummary()
+    }
+
+    func confirmStartProcessing() {
+        let summary = processingSummary()
+        startProcessingPrompt = nil
+        guard summary.canStart else { return }
+
+        logMessage = "已安排 \(summary.waitingCount) 个等待中的任务开始处理。"
+        logSubMessage = skippedProcessingSummary(summary)
+
+        // A live queue will pick up any newly imported waiting tasks after its
+        // current batch. Never cancel it: doing so could strand running tasks.
+        guard processingTask == nil else { return }
         processingTask = Task { [weak self] in
             await self?.runQueue()
+            self?.processingTask = nil
         }
+    }
+
+    private func processingSummary() -> StartProcessingPrompt {
+        StartProcessingPrompt(
+            waitingCount: tasks.count { $0.status == .waiting },
+            runningCount: tasks.count { $0.status == .running },
+            doneCount: tasks.count { $0.status == .done },
+            needsReviewCount: tasks.count { $0.status == .needsReview }
+        )
+    }
+
+    private func skippedProcessingSummary(_ summary: StartProcessingPrompt) -> String {
+        "跳过 \(summary.runningCount) 个处理中、\(summary.doneCount) 个已完成、\(summary.needsReviewCount) 个需确认任务。"
     }
 
     /// Clears every task except those currently being processed — a running
@@ -546,10 +595,12 @@ final class AppStore: ObservableObject {
             tasks[index].detail = "等待空闲处理槽位"
         }
 
-        var pending = tasks.indices.filter { tasks[$0].status == .waiting || tasks[$0].status == .needsReview }
-        while !pending.isEmpty, !Task.isCancelled {
+        while !Task.isCancelled {
+            // Re-read the queue between batches so waiting tasks imported while
+            // processing is underway can join without restarting the queue.
+            let pending = tasks.indices.filter { tasks[$0].status == .waiting }
+            guard !pending.isEmpty else { break }
             let batch = Array(pending.prefix(maxConcurrentTasks))
-            pending.removeFirst(batch.count)
             let currentSettings = settings
             let jobs: [(Int, FolderTask, [SampleProfile])] = batch.map { index in
                 let task = tasks[index]

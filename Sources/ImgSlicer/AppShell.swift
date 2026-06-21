@@ -55,6 +55,29 @@ struct AppShell: View {
         } message: { prompt in
             Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
         }
+        .alert(
+            store.startProcessingPrompt?.title ?? "开始处理",
+            isPresented: Binding(
+                get: { store.startProcessingPrompt != nil },
+                set: { if !$0 { store.startProcessingPrompt = nil } }
+            ),
+            presenting: store.startProcessingPrompt
+        ) { prompt in
+            if prompt.canStart {
+                Button("开始处理 \(prompt.waitingCount) 个任务") {
+                    store.confirmStartProcessing()
+                }
+                Button("取消", role: .cancel) {
+                    store.startProcessingPrompt = nil
+                }
+            } else {
+                Button("知道了", role: .cancel) {
+                    store.startProcessingPrompt = nil
+                }
+            }
+        } message: { prompt in
+            Text(prompt.message)
+        }
     }
 
     /// Invisible buttons whose keyboard shortcuts work whenever the window is
@@ -125,28 +148,12 @@ final class URLCollector: @unchecked Sendable {
 }
 
 struct TopBar: View {
-    @EnvironmentObject private var store: AppStore
-
     var body: some View {
         HStack {
             BrandLockup()
             Spacer()
-            HStack(spacing: 10) {
-                Button("导入文件") { store.pickFiles() }
-                    .buttonStyle(TopBarButtonStyle())
-                    .help("导入图片文件或包含图片的文件夹")
-                Button { store.startProcessing() } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("开始")
-                    }
-                }
-                    .buttonStyle(StartProcessButtonStyle())
-                    .help("按当前裁切框开始批量输出")
-            }
         }
-        .padding(.leading, 84)
+        .padding(.leading, 68)
         .padding(.trailing, 18)
         .padding(.top, 17)
         .frame(height: 72, alignment: .topLeading)
@@ -188,6 +195,14 @@ struct QueuePanel: View {
                 Text("任务列表")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
+                Button {
+                    store.pickFiles()
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("追加导入图片或文件夹")
+
                 Button {
                     store.clearFinishedAndIdle()
                 } label: {
@@ -790,6 +805,17 @@ struct ParameterPanel: View {
                 }
                 .padding(14)
             }
+
+            Button {
+                store.startProcessing()
+            } label: {
+                Image(systemName: "play.circle.fill")
+            }
+            .buttonStyle(StartProcessButtonStyle())
+            .help("按当前裁切框开始批量输出")
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(16)
+            .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
         }
     }
 }
@@ -1330,34 +1356,16 @@ struct ParameterActionButtonStyle: ButtonStyle {
     }
 }
 
-struct TopBarButtonStyle: ButtonStyle {
-    var primary = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(primary ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
-            .frame(width: 94, height: 34)
-            .background(primary ? AppTheme.blue : Color.white.opacity(0.045))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(primary ? Color.white.opacity(0.08) : Color.white.opacity(0.06))
-            }
-            .opacity(configuration.isPressed ? 0.82 : 1)
-    }
-}
-
 struct StartProcessButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .bold))
+            .font(.system(size: 28, weight: .semibold))
             .foregroundStyle(AppTheme.text)
-            .frame(width: 82, height: 34)
+            .frame(width: 132, height: 50)
             .background(AppTheme.green.opacity(configuration.isPressed ? 0.78 : 0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
             .overlay {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 14)
                     .stroke(Color.white.opacity(configuration.isPressed ? 0.18 : 0.12))
             }
             .shadow(color: AppTheme.green.opacity(0.22), radius: 8, y: 3)
