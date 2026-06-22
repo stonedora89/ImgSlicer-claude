@@ -23,6 +23,7 @@ SOURCES=(
   "$ROOT_DIR/Sources/ImgSlicer/Models.swift"
   "$ROOT_DIR/Sources/ImgSlicer/FolderScanner.swift"
   "$ROOT_DIR/Sources/ImgSlicer/ExternalDetector.swift"
+  "$ROOT_DIR/Sources/ImgSlicer/ImageLoading.swift"
   "$ROOT_DIR/Sources/ImgSlicer/ImageProcessor.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Processing/CropDetectionPipeline.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Processing/CropEditStore.swift"
@@ -38,11 +39,24 @@ CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache" swiftc \
   -O \
   -framework AppKit \
   -framework Vision \
+  -framework ImageIO \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "${SOURCES[@]}" \
   -o "$MACOS/$APP_NAME"
 
 cp "$ROOT_DIR/Sources/ImgSlicer/Resources/icon.svg" "$RESOURCES/icon.svg"
+mkdir -p "$RESOURCES/detectors"
+cp "$ROOT_DIR/Sources/ImgSlicer/Resources/detectors/opencv_detector.py" "$RESOURCES/detectors/opencv_detector.py"
+
+if [ -d "$ROOT_DIR/vendor/python-standalone" ]; then
+  ditto "$ROOT_DIR/vendor/python-standalone" "$RESOURCES/python"
+elif [ -d "$ROOT_DIR/.venv" ]; then
+  echo "WARNING: vendor/python-standalone missing - bundling .venv (may not be portable to other Macs)"
+  ditto "$ROOT_DIR/.venv" "$RESOURCES/python"
+else
+  echo "WARNING: no bundled Python runtime found; detector will rely on system Python"
+fi
+
 # The host SDK's iconutil currently rejects its own generated iconset. Keep the
 # SVG in Resources and let Mojave use the generic app icon until a prebuilt,
 # verified .icns is added to the repository.

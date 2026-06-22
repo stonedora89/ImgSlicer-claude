@@ -1,7 +1,11 @@
 import AppKit
+#if !IMGSLICER_MOJAVE
 import SwiftUI
+#endif
 import ImageIO
+#if !IMGSLICER_MOJAVE
 import UniformTypeIdentifiers
+#endif
 
 /// Efficient, cached, downsampled image loading.
 ///
@@ -59,14 +63,21 @@ enum DownsampledImageLoader {
     /// Warm the cache for the given URLs in the background (e.g. the photos
     /// adjacent to the current selection) so navigating to them is instant.
     static func prefetch(_ urls: [URL], maxPixel: Int) {
+#if !IMGSLICER_MOJAVE
         for url in urls where cache.object(forKey: key(url, maxPixel)) == nil {
             Task.detached(priority: .utility) {
                 _ = load(url, maxPixel: maxPixel)
             }
         }
+#else
+        for url in urls where cache.object(forKey: key(url, maxPixel)) == nil {
+            _ = load(url, maxPixel: maxPixel)
+        }
+#endif
     }
 }
 
+#if !IMGSLICER_MOJAVE
 /// A SwiftUI view that loads a downsampled image asynchronously off the main
 /// thread, showing `placeholder` until it is ready. Reloads when `url` or
 /// `maxPixel` changes.
@@ -115,3 +126,4 @@ struct DownsampledImageView<Placeholder: View>: View {
         }
     }
 }
+#endif
