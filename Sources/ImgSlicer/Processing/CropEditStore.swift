@@ -1,4 +1,4 @@
-import CoreGraphics
+﻿import CoreGraphics
 import Foundation
 
 struct CropEditStore: Sendable {
@@ -12,11 +12,16 @@ struct CropEditStore: Sendable {
         for photoIndex in restored.photos.indices {
             let relativePath = restored.photos[photoIndex].relativePath
             guard let edit = edits.photos[relativePath], !edit.regions.isEmpty else { continue }
-            let isManual = edit.isManual ?? true
+            let isManual = edit.hasLocalOverrides ?? false
+            // Restoring a photo-level local override must not mark every box as manual.
+            // Box-level `isManual` is reserved for an actually hand-picked template/manual box.
             restored.photos[photoIndex].cropRegions = edit.regions.enumerated().map { offset, rect in
-                CropRegion(index: offset + 1, rect: rect.cgRect, angle: rect.angle ?? 0, isManual: isManual)
+                CropRegion(index: offset + 1, rect: rect.cgRect, angle: rect.angle ?? 0, isManual: false)
             }
-            restored.photos[photoIndex].isManual = isManual
+            if !isManual {
+                restored.photos[photoIndex].autoCropRegions = restored.photos[photoIndex].cropRegions
+            }
+            restored.photos[photoIndex].hasLocalOverrides = isManual
             restored.photos[photoIndex].status = isManual ? .manual : .located
         }
         return restored
@@ -26,7 +31,7 @@ struct CropEditStore: Sendable {
         var edits = loadEdits(rootURL: task.rootURL)
         edits.photos[photo.relativePath] = SavedPhotoEdit(
             updatedAt: Date(),
-            isManual: photo.isManual,
+            hasLocalOverrides: photo.hasLocalOverrides,
             regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
         )
         write(edits: edits, rootURL: task.rootURL)
@@ -38,16 +43,13 @@ struct CropEditStore: Sendable {
         for photo in photos {
             edits.photos[photo.relativePath] = SavedPhotoEdit(
                 updatedAt: now,
-                isManual: photo.isManual,
+                hasLocalOverrides: photo.hasLocalOverrides,
                 regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
             )
         }
         write(edits: edits, rootURL: task.rootURL)
     }
 
-    /// Remove only this photo's cached crop state. Explicit re-detection uses
-    /// this before reading the source image so a later import cannot resurrect
-    /// the discarded manual/automatic boxes.
     func remove(photoRelativePath: String, rootURL: URL) {
         var edits = loadEdits(rootURL: rootURL)
         guard edits.photos.removeValue(forKey: photoRelativePath) != nil else { return }
@@ -59,10 +61,6 @@ struct CropEditStore: Sendable {
         guard let data = try? Data(contentsOf: url) else {
             return SavedCropEdits()
         }
-        // MUST match write()'s .iso8601 date strategy. With the default strategy
-        // the iso8601 string dates fail to decode, loadEdits silently returns
-        // empty, and every save then overwrites the file with only the current
-        // photo — wiping all other photos' edits (including manual GT).
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return (try? decoder.decode(SavedCropEdits.self, from: data)) ?? SavedCropEdits()
@@ -78,7 +76,6 @@ struct CropEditStore: Sendable {
             let data = try encoder.encode(edits)
             try data.write(to: url, options: .atomic)
         } catch {
-            // Manual edits are still kept in memory; persistence is a convenience layer.
         }
     }
 
@@ -94,8 +91,36 @@ private struct SavedCropEdits: Codable {
 
 private struct SavedPhotoEdit: Codable {
     var updatedAt: Date
-    var isManual: Bool?
+    var hasLocalOverrides: Bool?
     var regions: [SavedRect]
+
+    enum CodingKeys: String, CodingKey {
+        case updatedAt
+        case hasLocalOverrides
+        case isManual
+        case regions
+    }
+
+    init(updatedAt: Date, hasLocalOverrides: Bool?, regions: [SavedRect]) {
+        self.updatedAt = updatedAt
+        self.hasLocalOverrides = hasLocalOverrides
+        self.regions = regions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        hasLocalOverrides = try container.decodeIfPresent(Bool.self, forKey: .hasLocalOverrides)
+            ?? container.decodeIfPresent(Bool.self, forKey: .isManual)
+        regions = try container.decode([SavedRect].self, forKey: .regions)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(hasLocalOverrides, forKey: .hasLocalOverrides)
+        try container.encode(regions, forKey: .regions)
+    }
 }
 
 private struct SavedRect: Codable {
@@ -103,7 +128,6 @@ private struct SavedRect: Codable {
     var y: Double
     var width: Double
     var height: Double
-    // Optional so edits written before deskew existed still decode (missing -> 0).
     var angle: Double?
 
     init(rect: CGRect, angle: Double) {

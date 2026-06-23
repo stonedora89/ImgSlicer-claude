@@ -1,58 +1,58 @@
-import Foundation
+﻿import Foundation
 import CoreGraphics
 
 enum TaskStatus: String, CaseIterable, Identifiable, Sendable {
-    case waiting = "等待中"
-    case running = "处理中"
-    case needsReview = "需确认"
-    case done = "已完成"
+    case waiting = "绛夊緟涓?"
+    case running = "澶勭悊涓?"
+    case needsReview = "闇€纭"
+    case done = "宸插畬鎴?"
 
     var id: String { rawValue }
 }
 
 enum PhotoStatus: String, Sendable {
-    case pending = "待处理"
-    case locating = "定位中"
-    case located = "已定位"
-    case running = "处理中"
-    case autoDone = "自动完成"
-    case manual = "手动微调"
-    case failed = "需确认"
+    case pending = "寰呭鐞?"
+    case locating = "瀹氫綅涓?"
+    case located = "宸插畾浣?"
+    case running = "澶勭悊涓?"
+    case autoDone = "鑷姩瀹屾垚"
+    case manual = "鎵嬪姩寰皟"
+    case failed = "闇€纭"
 }
 
 enum OrientationMode: String, CaseIterable, Identifiable, Sendable {
-    case automatic = "自动"
-    case landscape = "横向"
-    case portrait = "纵向"
+    case automatic = "鑷姩"
+    case landscape = "妯悜"
+    case portrait = "绾靛悜"
     var id: String { rawValue }
 }
 
 enum CropBusinessProfile: String, CaseIterable, Identifiable, Codable, Sendable {
-    case balanced = "均衡"
-    case filmScan = "胶片扫描"
-    case gridPhoto = "多宫格照片"
+    case balanced = "鍧囪　"
+    case filmScan = "鑳剁墖鎵弿"
+    case gridPhoto = "澶氬鏍肩収鐗?"
 
     var id: String { rawValue }
 }
 
 enum ImagePreprocessMode: String, CaseIterable, Identifiable, Sendable {
-    case original = "原图"
-    case highContrast = "增强"
-    case mask = "蒙版"
-    case inverted = "反转"
+    case original = "鍘熷浘"
+    case highContrast = "澧炲己"
+    case mask = "钂欑増"
+    case inverted = "鍙嶈浆"
 
     var id: String { rawValue }
 }
 
 enum CropAlgorithmMode: String, CaseIterable, Identifiable, Sendable {
-    case automatic = "自动"
-    case projectionSeparators = "分隔线"
-    case filmFrames = "胶片框"
-    case visionRectangles = "矩形"
-    case foregroundComponents = "主体"
-    case localContrastComponents = "局部对比"
-    case externalDetector = "智能识别"
-    case darkGutters = "暗区网格"
+    case automatic = "鑷姩"
+    case projectionSeparators = "鍒嗛殧绾?"
+    case filmFrames = "鑳剁墖妗?"
+    case visionRectangles = "鐭╁舰"
+    case foregroundComponents = "涓讳綋"
+    case localContrastComponents = "灞€閮ㄥ姣?"
+    case externalDetector = "鏅鸿兘璇嗗埆"
+    case darkGutters = "鏆楀尯缃戞牸"
 
     var id: String { rawValue }
 }
@@ -63,9 +63,13 @@ struct PhotoItem: Identifiable, Hashable, Sendable {
     let relativePath: String
     var status: PhotoStatus = .pending
     var cropRegions: [CropRegion] = [CropRegion(index: 1, rect: CGRect(x: 0.08, y: 0.08, width: 0.84, height: 0.84))]
+    var autoCropRegions: [CropRegion] = [CropRegion(index: 1, rect: CGRect(x: 0.08, y: 0.08, width: 0.84, height: 0.84))]
     var cropCandidates: [CropCandidate] = []
     var selectedCandidateID: CropCandidate.ID?
-    var isManual: Bool = false
+    /// Whether this photo currently has any locally-adjusted crop result.
+    /// Used for overwrite confirmation / persistence only; it does not choose
+    /// between global re-detect and sample-based recognition paths.
+    var hasLocalOverrides: Bool = false
     var outputURLs: [URL] = []
 
     var name: String { url.lastPathComponent }
@@ -79,6 +83,8 @@ struct CropRegion: Identifiable, Hashable, Sendable {
     /// centre. 0 means axis-aligned (the historical behaviour); a non-zero
     /// angle lets a skewed scan be cut out straight.
     var angle: Double = 0
+    /// True only for a box that comes from a manual edit/template action.
+    /// This is box-level metadata for display/template use, not recognition-mode routing.
     var isManual: Bool = false
 }
 
@@ -122,7 +128,7 @@ struct FolderTask: Identifiable, Sendable {
     let imageCount: Int
     let folderCount: Int
     var status: TaskStatus = .waiting
-    var detail: String = "等待开始处理"
+    var detail: String = "绛夊緟寮€濮嬪鐞?"
     var processedCount: Int = 0
     var photos: [PhotoItem]
 

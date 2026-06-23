@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(C:\\Users\\dabinhuang\\.claude/**)",
+      "Read(C:\\Users\\dabinhuang\\.claude\\debug/**)"
+    ]
+  },
+  "$version": 4
+}

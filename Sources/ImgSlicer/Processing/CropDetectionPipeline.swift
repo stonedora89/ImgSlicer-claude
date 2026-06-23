@@ -1,4 +1,4 @@
-import Foundation
+﻿import Foundation
 
 enum CropDetectionStage: Sendable {
     case projectionSeparators
@@ -12,19 +12,19 @@ enum CropDetectionStage: Sendable {
     var displayName: String {
         switch self {
         case .projectionSeparators:
-            return "分隔线识别"
+            return "鍒嗛殧绾胯瘑鍒?
         case .filmFrames:
-            return "胶片边框"
+            return "鑳剁墖杈规"
         case .visionRectangles:
-            return "矩形轮廓"
+            return "鐭╁舰杞粨"
         case .foregroundComponents:
-            return "主体区域"
+            return "涓讳綋鍖哄煙"
         case .localContrastComponents:
-            return "局部对比"
+            return "灞€閮ㄥ姣?
         case .externalDetector:
-            return "智能识别"
+            return "鏅鸿兘璇嗗埆"
         case .darkGutters:
-            return "暗区网格"
+            return "鏆楀尯缃戞牸"
         }
     }
 }
@@ -52,11 +52,11 @@ struct CropDetectionPipeline: Sendable {
         let automaticStages: [CropDetectionStage]
         switch settings.businessProfile {
         case .filmScan:
-            automaticStages = [.projectionSeparators, .filmFrames, .localContrastComponents, .visionRectangles, .foregroundComponents]
+            automaticStages = [.projectionSeparators, .darkGutters, .filmFrames, .localContrastComponents, .visionRectangles, .foregroundComponents]
         case .gridPhoto:
-            automaticStages = [.projectionSeparators, .localContrastComponents, .foregroundComponents, .visionRectangles, .filmFrames]
+            automaticStages = [.projectionSeparators, .darkGutters, .localContrastComponents, .foregroundComponents, .visionRectangles, .filmFrames]
         case .balanced:
-            automaticStages = [.filmFrames, .projectionSeparators, .localContrastComponents, .visionRectangles, .foregroundComponents]
+            automaticStages = [.filmFrames, .projectionSeparators, .darkGutters, .localContrastComponents, .visionRectangles, .foregroundComponents]
         }
 
         guard let selectedStage = settings.algorithmMode.stage else {
@@ -94,10 +94,11 @@ private extension CropAlgorithmMode {
 
 struct ProcessingPolicy: Sendable {
     func shouldReuseLocatedRegions(for photo: PhotoItem) -> Bool {
-        guard !photo.isManual else { return true }
+        guard !photo.hasLocalOverrides else { return true }
         guard photo.status == .located || photo.status == .autoDone else { return false }
         return photo.cropRegions.contains { region in
             region.rect.width > 0.05 && region.rect.height > 0.05
         }
     }
 }
+

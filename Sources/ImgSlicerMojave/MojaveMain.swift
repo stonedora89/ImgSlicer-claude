@@ -1,4 +1,4 @@
-import AppKit
+﻿import AppKit
 import Foundation
 
 @main
@@ -34,10 +34,10 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
 
     private let tableView = NSTableView()
     private let preview = MojavePreviewView()
-    private let statusLabel = NSTextField(labelWithString: "导入图片或文件夹开始")
-    private let importButton = NSButton(title: "导入", target: nil, action: nil)
-    private let locateButton = NSButton(title: "重新识别", target: nil, action: nil)
-    private let exportButton = NSButton(title: "识别并导出", target: nil, action: nil)
+    private let statusLabel = NSTextField(labelWithString: "瀵煎叆鍥剧墖鎴栨枃浠跺す寮€濮?)
+    private let importButton = NSButton(title: "瀵煎叆", target: nil, action: nil)
+    private let locateButton = NSButton(title: "閲嶆柊璇嗗埆", target: nil, action: nil)
+    private let exportButton = NSButton(title: "璇嗗埆骞跺鍑?, target: nil, action: nil)
 
     init() {
         let window = NSWindow(
@@ -83,7 +83,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("photos"))
-        column.title = "图片"
+        column.title = "鍥剧墖"
         column.width = 250
         tableView.addTableColumn(column)
         tableView.headerView = nil
@@ -126,7 +126,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
         }
         tasks = imported
         rebuildRows()
-        statusLabel.stringValue = tasks.isEmpty ? "没有找到支持的图片" : "已导入 \(rows.count) 张图片"
+        statusLabel.stringValue = tasks.isEmpty ? "娌℃湁鎵惧埌鏀寔鐨勫浘鐗? : "宸插鍏?\(rows.count) 寮犲浘鐗?
     }
 
     @objc private func redetectSelected() {
@@ -137,7 +137,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
         let rootURL = tasks[index.task].rootURL
         editStore.remove(photoRelativePath: photo.relativePath, rootURL: rootURL)
         sampleLibrary.removeProfiles(sourceName: photo.name, rootURL: rootURL)
-        setBusy(true, message: "正在从原图重新识别…")
+        setBusy(true, message: "姝ｅ湪浠庡師鍥鹃噸鏂拌瘑鍒€?)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -151,10 +151,10 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
                     self.tasks[index.task].photos[index.photo].cropRegions = result.regions
                     self.tasks[index.task].photos[index.photo].cropCandidates = result.candidates
                     self.tasks[index.task].photos[index.photo].status = .located
-                    self.tasks[index.task].photos[index.photo].isManual = false
+                    self.tasks[index.task].photos[index.photo].hasLocalOverrides = false
                     self.editStore.save(photo: self.tasks[index.task].photos[index.photo], in: self.tasks[index.task])
                     self.showPhoto(at: row)
-                    self.statusLabel.stringValue = "重新识别完成：\(result.regions.count) 个区域"
+                    self.statusLabel.stringValue = "閲嶆柊璇嗗埆瀹屾垚锛歕(result.regions.count) 涓尯鍩?
                 }
                 self.setBusy(false)
             }
@@ -164,7 +164,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
     @objc private func processAll() {
         guard !tasks.isEmpty else { return }
         let jobs = tasks
-        setBusy(true, message: "正在识别并导出 \(rows.count) 张图片…")
+        setBusy(true, message: "姝ｅ湪璇嗗埆骞跺鍑?\(rows.count) 寮犲浘鐗団€?)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var completed: [(Int, [PhotoProcessResult])] = []
@@ -186,7 +186,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
                 }
                 self.tableView.reloadData()
                 if self.tableView.selectedRow >= 0 { self.showPhoto(at: self.tableView.selectedRow) }
-                self.statusLabel.stringValue = "完成：已输出 \(outputCount) 张裁切图片"
+                self.statusLabel.stringValue = "瀹屾垚锛氬凡杈撳嚭 \(outputCount) 寮犺鍒囧浘鐗?
                 self.setBusy(false)
             }
         }
@@ -274,3 +274,4 @@ final class MojavePreviewView: NSView {
         }
     }
 }
+
