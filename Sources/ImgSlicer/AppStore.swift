@@ -58,6 +58,10 @@ final class AppStore: ObservableObject {
         return photo.cropRegions.contains { $0.rect.width > 0.02 && $0.rect.height > 0.02 }
     }
 
+    var canRestoreSelectedPhotoAutomatic: Bool {
+        !(selectedPhoto?.cropCandidates.isEmpty ?? true)
+    }
+
     var recognitionMarginReference: CropMarginReference? {
         guard let photo = selectedPhoto else { return nil }
         let selectedCandidate = photo.selectedCandidateID.flatMap { candidateID in
@@ -223,7 +227,6 @@ final class AppStore: ObservableObject {
         selectedPhotoID = tasks.first(where: { $0.id == taskID })?.photos.first?.id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
-        applyInheritedMarginsToSelection()
     }
 
     func selectPhoto(_ photoID: PhotoItem.ID) {
@@ -231,7 +234,6 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photoID
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
-        applyInheritedMarginsToSelection()
     }
 
     func selectPreviousPhoto() {
@@ -243,7 +245,6 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photos[previousIndex].id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
-        applyInheritedMarginsToSelection()
     }
 
     func selectNextPhoto() {
@@ -255,7 +256,6 @@ final class AppStore: ObservableObject {
         selectedPhotoID = photos[nextIndex].id
         selectedCropRegionID = nil
         scheduleLocatorAroundSelection()
-        applyInheritedMarginsToSelection()
     }
 
     func selectCropRegion(_ regionID: CropRegion.ID) {
@@ -277,6 +277,41 @@ final class AppStore: ObservableObject {
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框，人工结果会优先保留。"
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 手动微调已作为参考样本"
+    }
+
+    /// Translates every frame on the selected image by a source-image pixel
+    /// distance. This is intentionally separate from edge insets: translation
+    /// preserves each frame's dimensions, angle, and layout relative to the
+    /// other frames.
+    func moveAllCropRegions(dxPixels: Double, dyPixels: Double) {
+        guard dxPixels != 0 || dyPixels != 0,
+              let indexes = selectedIndexes() else { return }
+
+        let photo = tasks[indexes.task].photos[indexes.photo]
+        let pixelSize = NSImage(contentsOf: photo.url)?
+            .cgImage(forProposedRect: nil, context: nil, hints: nil)
+            .map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: 2000, height: 2000)
+        let dx = dxPixels / max(1, pixelSize.width)
+        let dy = dyPixels / max(1, pixelSize.height)
+
+        tasks[indexes.task].photos[indexes.photo].cropRegions = photo.cropRegions.map { region in
+            CropRegion(
+                id: region.id,
+                index: region.index,
+                rect: CGRect(
+                    x: region.rect.minX + dx,
+                    y: region.rect.minY + dy,
+                    width: region.rect.width,
+                    height: region.rect.height
+                ).normalizedCropRect,
+                angle: region.angle,
+                isManual: true
+            )
+        }
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已整体移动所有裁切框")
+        logMessage = "已整体移动当前图片的所有裁切框。"
+        logSubMessage = "水平 \(String(format: "%+.1f", dxPixels)) px · 垂直 \(String(format: "%+.1f", dyPixels)) px"
     }
 
     /// Enters marquee mode: the next drag on the preview defines a brand-new
@@ -345,6 +380,12 @@ final class AppStore: ObservableObject {
         applyCandidate(candidate, taskIndex: indexes.task, photoIndex: indexes.photo)
     }
 
+    func restoreSelectedPhotoAutomatic() {
+        guard let indexes = selectedIndexes(),
+              let candidate = tasks[indexes.task].photos[indexes.photo].cropCandidates.first else { return }
+        applyCandidate(candidate, taskIndex: indexes.task, photoIndex: indexes.photo)
+    }
+
     func reapplySelectedCandidateMargins(reportFeedback: Bool = true) {
         guard let indexes = selectedIndexes() else { return }
         let photoID = tasks[indexes.task].photos[indexes.photo].id
@@ -390,10 +431,6 @@ final class AppStore: ObservableObject {
             logMessage = "已按当前内收量微调裁切框。"
             logSubMessage = "当前图已保存为手动调整结果"
         }
-    }
-
-    private func applyInheritedMarginsToSelection() {
-        reapplySelectedCandidateMargins(reportFeedback: false)
     }
 
     func chooseCustomICCProfile() {

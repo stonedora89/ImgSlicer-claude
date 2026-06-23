@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="1040" viewBox="0 0 560 1040">
+  <defs>
+    <style>
+      .title{font:600 18px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;fill:#edf1f6}
+      .section{font:500 13px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;fill:#98a4b3;letter-spacing:.2px}
+      .label{font:400 12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;fill:#aab4c1}
+      .value{font:500 13px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;fill:#e9edf3}
+      .tiny{font:500 11px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;fill:#8f9baa}
+      .icon{font:600 15px -apple-system,BlinkMacSystemFont,sans-serif;fill:#dce3eb}
+    </style>
+  </defs>
+  <rect width="560" height="1040" rx="22" fill="#12171e"/>
+  <rect x="1" y="1" width="558" height="1038" rx="21" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
+
+  <!-- header -->
+  <text x="28" y="44" class="title">参数设置</text>
+  <rect x="466" y="23" width="30" height="30" rx="6" fill="#23313b" stroke="#547b92" stroke-opacity=".7"/>
+  <text x="474" y="43" class="icon" fill="#82bfdc">⊞</text>
+  <rect x="506" y="23" width="30" height="30" rx="6" fill="#1d2b33" stroke="#4f927d" stroke-opacity=".7"/>
+  <text x="514" y="43" class="icon" fill="#80c9ad">✦</text>
+  <line x1="0" y1="74" x2="560" y2="74" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- auto -->
+  <text x="28" y="106" class="section">自动效果</text>
+  <rect x="28" y="121" width="504" height="32" rx="5" fill="#182029" stroke="#ffffff" stroke-opacity=".08"/>
+  <circle cx="45" cy="137" r="7" fill="#4e8bb2"/><path d="M42 137l2 2 4-5" fill="none" stroke="#eaf4fa" stroke-width="1.5"/>
+  <text x="62" y="142" class="value">智能识别</text>
+  <rect x="28" y="159" width="504" height="32" rx="5" fill="#151b22" stroke="#ffffff" stroke-opacity=".06"/>
+  <circle cx="45" cy="175" r="7" fill="none" stroke="#7b8796"/><text x="62" y="180" class="value">原始边界</text>
+  <line x1="28" y1="214" x2="532" y2="214" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- movement -->
+  <text x="28" y="246" class="section">整体移动</text>
+  <rect x="250" y="259" width="30" height="25" rx="5" fill="#1b232c" stroke="#ffffff" stroke-opacity=".09"/><text x="260" y="277" class="icon">↑</text>
+  <rect x="216" y="288" width="30" height="25" rx="5" fill="#1b232c" stroke="#ffffff" stroke-opacity=".09"/><text x="226" y="306" class="icon">←</text>
+  <rect x="250" y="288" width="30" height="25" rx="5" fill="#1b232c" stroke="#ffffff" stroke-opacity=".09"/><text x="260" y="306" class="icon">↓</text>
+  <rect x="284" y="288" width="30" height="25" rx="5" fill="#1b232c" stroke="#ffffff" stroke-opacity=".09"/><text x="294" y="306" class="icon">→</text>
+  <line x1="28" y1="337" x2="532" y2="337" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- format -->
+  <text x="28" y="369" class="section">输出格式</text>
+  <rect x="28" y="385" width="504" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <text x="40" y="405" class="value">JPEG</text><text x="510" y="405" class="tiny">⌄</text>
+  <line x1="28" y1="439" x2="532" y2="439" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- color -->
+  <text x="28" y="471" class="section">导出色彩空间</text>
+  <rect x="28" y="487" width="504" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <text x="40" y="507" class="value">sRGB</text><text x="510" y="507" class="tiny">⌄</text>
+  <line x1="28" y1="541" x2="532" y2="541" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- margins -->
+  <text x="28" y="573" class="section">边缘内收 · 去黑边</text>
+  <text x="28" y="606" class="label">上内收</text><text x="286" y="606" class="label">下内收</text>
+  <rect x="28" y="616" width="246" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <rect x="286" y="616" width="246" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <text x="40" y="636" class="value">0</text><text x="246" y="636" class="tiny">px</text>
+  <text x="298" y="636" class="value">0</text><text x="504" y="636" class="tiny">px</text>
+  <text x="28" y="676" class="label">左内收</text><text x="286" y="676" class="label">右内收</text>
+  <rect x="28" y="686" width="246" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <rect x="286" y="686" width="246" height="30" rx="5" fill="#1a222b" stroke="#ffffff" stroke-opacity=".09"/>
+  <text x="40" y="706" class="value">0</text><text x="246" y="706" class="tiny">px</text>
+  <text x="298" y="706" class="value">0</text><text x="504" y="706" class="tiny">px</text>
+  <line x1="0" y1="950" x2="560" y2="950" stroke="#ffffff" stroke-opacity=".1"/>
+  <rect x="248" y="970" width="64" height="38" rx="8" fill="#4f9b7d"/>
+  <path d="M274 981l12 8-12 8z" fill="#fff"/>
+</svg>

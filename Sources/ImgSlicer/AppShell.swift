@@ -857,10 +857,11 @@ struct ParameterPanel: View {
 
     private var content: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("参数设置")
-                    .font(.system(size: 15, weight: .bold))
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
+                    Text("参数设置")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
                     Button {
                         store.toggleDrawNewRegion()
                     } label: {
@@ -880,40 +881,56 @@ struct ParameterPanel: View {
                     .help("重新识别当前图片：清除当前图旧框并重新运行算法；会参考同文件夹其他样图")
                 }
             }
-            .padding(16)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
 
             ScrollView {
-                VStack(spacing: 12) {
-                    SettingsGroup("自动效果") {
-                        VStack(spacing: 10) {
+                VStack(spacing: 0) {
+                    SettingsGroup(
+                        "自动效果",
+                        actionIcon: "arrow.counterclockwise",
+                        action: { store.restoreSelectedPhotoAutomatic() }
+                    ) {
+                        VStack(spacing: 4) {
                             AutoCandidatePicker()
                         }
                     }
+                    SettingsGroup("整体移动") {
+                        CropTranslationControls()
+                    }
+                    SettingsGroup("边缘内收 · 去黑边") {
+                        VStack(spacing: 4) {
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                                MarginField(title: "上内收", value: $store.settings.top)
+                                MarginField(title: "下内收", value: $store.settings.bottom)
+                                MarginField(title: "左内收", value: $store.settings.left)
+                                MarginField(title: "右内收", value: $store.settings.right)
+                            }
+                        }
+                    }
                     SettingsGroup("输出格式") {
-                        VStack(alignment: .leading, spacing: 9) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Picker("", selection: $store.settings.outputFormat) {
                                 ForEach(OutputFormat.allCases) { format in
                                     Text(format.rawValue).tag(format)
                                 }
                             }
                             .labelsHidden()
-                            .pickerStyle(.segmented)
+                            .pickerStyle(.menu)
+                            .inspectorFieldStyle()
 
-                            Text(store.settings.outputFormat.detail)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(AppTheme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     SettingsGroup("导出色彩空间") {
-                        VStack(alignment: .leading, spacing: 9) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Picker("色彩空间", selection: $store.settings.outputColorSpace) {
                                 ForEach(OutputColorSpace.allCases) { colorSpace in
                                     Text(colorSpace.rawValue).tag(colorSpace)
                                 }
                             }
                             .pickerStyle(.menu)
+                            .inspectorFieldStyle()
 
                             if store.settings.outputColorSpace == .customICC {
                                 Button {
@@ -929,55 +946,63 @@ struct ParameterPanel: View {
                                 .buttonStyle(PanelButtonStyle())
                             }
 
-                            Text(colorSpaceDescription)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(AppTheme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    SettingsGroup("边缘内收 · 去黑边") {
-                        VStack(spacing: 10) {
-                            if let reference = store.recognitionMarginReference {
-                                RecognitionMarginReferenceView(reference: reference)
-                            }
-                            Text("识别四边后向画面内收；设为 0 px 可保留原始识别边界。")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(AppTheme.muted)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                MarginField(title: "上内收", value: $store.settings.top)
-                                MarginField(title: "下内收", value: $store.settings.bottom)
-                                MarginField(title: "左内收", value: $store.settings.left)
-                                MarginField(title: "右内收", value: $store.settings.right)
-                            }
                         }
                     }
                 }
-                .padding(14)
             }
 
-            Button {
-                store.startProcessing()
-            } label: {
-                Image(systemName: "play.circle.fill")
-            }
-            .buttonStyle(StartProcessButtonStyle())
+            Button { store.startProcessing() } label: { Image(systemName: "play.fill") }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .tint(AppTheme.green)
             .help("按当前裁切框开始批量输出")
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(16)
+            .padding(14)
             .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
         }
     }
 
-    private var colorSpaceDescription: String {
-        switch store.settings.outputColorSpace {
-        case .sRGB:
-            "转换并嵌入标准 sRGB 配置，适合屏幕和网络使用。"
-        case .adobeRGB:
-            "转换并嵌入 Adobe RGB (1998)，保留更宽的印刷色域。"
-        case .customICC:
-            "按所选 ICC 文件转换并嵌入输出图片。"
+}
+
+struct CropTranslationControls: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(spacing: 4) {
+                CropMoveButton(icon: "arrow.up") { move(x: 0, y: -1) }
+                HStack(spacing: 4) {
+                    CropMoveButton(icon: "arrow.left") { move(x: -1, y: 0) }
+                    CropMoveButton(icon: "arrow.down") { move(x: 0, y: 1) }
+                    CropMoveButton(icon: "arrow.right") { move(x: 1, y: 0) }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .disabled(store.selectedPhoto == nil)
         }
+    }
+
+    private func move(x: Double, y: Double) {
+        store.moveAllCropRegions(dxPixels: x, dyPixels: y)
+    }
+}
+
+private struct CropMoveButton: View {
+    let icon: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 30, height: 24)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(AppTheme.text)
+        .background(Color.white.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.07)))
+        .help("整体移动所有裁切框")
     }
 }
 
@@ -985,25 +1010,17 @@ struct AutoCandidatePicker: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("候选效果")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(AppTheme.muted)
-                Spacer()
-            }
-
+        VStack(alignment: .leading, spacing: 4) {
             if let photo = store.selectedPhoto {
                 if !photo.cropCandidates.isEmpty {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 4) {
                         ForEach(photo.cropCandidates) { candidate in
                             Button {
                                 store.applySelectedCandidate(candidate.id)
                             } label: {
                                 CandidateRow(
                                     icon: photo.selectedCandidateID == candidate.id ? "checkmark.circle.fill" : "circle",
-                                    title: candidate.title,
-                                    detail: "\(candidate.detail) · 可信度 \(Int(candidate.score * 100))%"
+                                    title: candidate.title
                                 )
                             }
                             .buttonStyle(CandidateButtonStyle(active: photo.selectedCandidateID == candidate.id))
@@ -1012,12 +1029,11 @@ struct AutoCandidatePicker: View {
                 } else if !photo.cropRegions.isEmpty {
                     CandidateRow(
                         icon: "checkmark.circle.fill",
-                        title: "当前裁切框",
-                        detail: "已保留当前结果，可重新生成自动效果"
+                        title: "当前裁切框"
                     )
                     .padding(.horizontal, 10)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 44)
+                    .frame(height: 30)
                     .background(AppTheme.blue.opacity(0.18))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay {
@@ -1025,14 +1041,6 @@ struct AutoCandidatePicker: View {
                             .stroke(AppTheme.blue.opacity(0.42))
                     }
                 }
-            } else {
-                Text("选择图片后生成自动效果")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AppTheme.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(Color.black.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
     }
@@ -1084,19 +1092,13 @@ struct CollapsibleGroup<Content: View>: View {
 struct CandidateRow: View {
     let icon: String
     let title: String
-    let detail: String
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(detail)
-                    .font(.system(size: 10))
-                    .foregroundStyle(AppTheme.muted)
-            }
+                .font(.system(size: 12, weight: .semibold))
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
             Spacer()
         }
     }
@@ -1291,25 +1293,45 @@ struct EmptyQueueView: View {
 }
 
 struct SettingsGroup<Content: View>: View {
+    @EnvironmentObject private var store: AppStore
     let title: String
+    let actionIcon: String?
+    let action: (() -> Void)?
     let content: Content
 
-    init(_ title: String, @ViewBuilder content: () -> Content) {
+    init(
+        _ title: String,
+        actionIcon: String? = nil,
+        action: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
         self.title = title
+        self.actionIcon = actionIcon
+        self.action = action
         self.content = content()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.86, green: 0.89, blue: 0.93))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.muted)
+                Spacer()
+                if let actionIcon, let action {
+                    Button(action: action) {
+                        Image(systemName: actionIcon)
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(InspectorIconButtonStyle())
+                    .disabled(!store.canRestoreSelectedPhotoAutomatic)
+                }
+            }
             content
         }
-        .padding(14)
-        .background(Color.white.opacity(0.025))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.05)))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
     }
 }
 
@@ -1371,9 +1393,9 @@ struct MarginField: View {
     @Binding var value: Double
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 11))
+                .font(.system(size: 10))
                 .foregroundStyle(AppTheme.muted)
             HStack(spacing: 5) {
                 TextField("0", value: clampedValue, format: .number.precision(.fractionLength(0)))
@@ -1385,14 +1407,11 @@ struct MarginField: View {
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.muted)
             }
-            .padding(.horizontal, 7)
-            .frame(height: 27)
-            .background(Color.white.opacity(0.055))
-            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .background(Color.white.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .padding(10)
-        .background(Color.black.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var clampedValue: Binding<Double> {
@@ -1483,6 +1502,36 @@ extension View {
     func panelStyle() -> some View {
         modifier(PanelStyle())
     }
+
+    func inspectorFieldStyle() -> some View {
+        modifier(InspectorFieldStyle())
+    }
+}
+
+struct InspectorFieldStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 12))
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .padding(.horizontal, 8)
+            .background(Color.white.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.white.opacity(0.08))
+            }
+    }
+}
+
+struct InspectorIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(AppTheme.muted)
+            .frame(width: 22, height: 22)
+            .background(configuration.isPressed ? Color.white.opacity(0.09) : Color.white.opacity(0.035))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .opacity(configuration.isPressed ? 0.75 : 1)
+    }
 }
 
 struct IconButtonStyle: ButtonStyle {
@@ -1501,16 +1550,16 @@ struct AccentIconButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 14, weight: .bold))
+            .font(.system(size: 12, weight: .bold))
             .foregroundStyle(color)
-            .frame(width: 31, height: 31)
+            .frame(width: 26, height: 26)
             .background(color.opacity(configuration.isPressed ? 0.24 : 0.14))
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
             .overlay {
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: 7)
                     .stroke(color.opacity(configuration.isPressed ? 0.58 : 0.36), lineWidth: 1)
             }
-            .shadow(color: color.opacity(0.18), radius: 8, y: 3)
+            .shadow(color: color.opacity(0.14), radius: 4, y: 1)
             .opacity(configuration.isPressed ? 0.84 : 1)
     }
 }
@@ -1550,6 +1599,7 @@ struct StartProcessButtonStyle: ButtonStyle {
     }
 }
 
+
 struct FilmstripNavButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -1588,11 +1638,11 @@ struct CandidateButtonStyle: ButtonStyle {
             .foregroundStyle(active ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
+            .frame(height: 30)
             .background(active ? AppTheme.blue.opacity(0.18) : Color.black.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 5)
                     .stroke(active ? AppTheme.blue.opacity(0.42) : Color.white.opacity(0.05))
             }
             .opacity(configuration.isPressed ? 0.82 : 1)
