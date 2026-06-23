@@ -72,6 +72,16 @@ final class AppStore: ObservableObject {
         return task.photos.first
     }
 
+    /// The crop box the angle control edits: the explicitly-selected one, or
+    /// the photo's first box as a fallback so the panel always has a target.
+    var selectedCropRegion: CropRegion? {
+        guard let photo = selectedPhoto else { return nil }
+        if let selectedCropRegionID, let region = photo.cropRegions.first(where: { $0.id == selectedCropRegionID }) {
+            return region
+        }
+        return photo.cropRegions.first
+    }
+
     var canRetileSelectedPhotoFromTemplate: Bool {
         guard let photo = selectedPhoto else { return false }
         return photo.cropRegions.contains { $0.rect.width > 0.02 && $0.rect.height > 0.02 }
@@ -254,6 +264,26 @@ final class AppStore: ObservableObject {
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框，人工结果会优先保留。"
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 手动微调已作为参考样本"
+    }
+
+    /// Manually sets a box's tilt (degrees, about its centre). Mirrors
+    /// `updateSelectedCrop`: the box becomes a manual result, its angle is
+    /// persisted, and it is offered as a reference sample. The UI clamps the
+    /// range, so any value handed in here is taken as-is.
+    func updateSelectedCropAngle(regionID: CropRegion.ID, angle: Double) {
+        guard let indexes = selectedIndexes() else { return }
+        guard let regionIndex = tasks[indexes.task].photos[indexes.photo].cropRegions.firstIndex(where: { $0.id == regionID }) else { return }
+        selectedCropRegionID = regionID
+        tasks[indexes.task].photos[indexes.photo].cropRegions[regionIndex].angle = angle
+        tasks[indexes.task].photos[indexes.photo].cropRegions[regionIndex].isManual = true
+        tasks[indexes.task].photos[indexes.photo].isManual = true
+        tasks[indexes.task].photos[indexes.photo].status = .manual
+        tasks[indexes.task].status = .needsReview
+        tasks[indexes.task].detail = "已保存人工旋转结果"
+        editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
+        saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
+        logMessage = "已更新裁切框角度，人工结果会优先保留。"
+        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · \(String(format: "%.1f", angle))° 手动旋转"
     }
 
     /// Enters marquee mode: the next drag on the preview defines a brand-new

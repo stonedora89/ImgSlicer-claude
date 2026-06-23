@@ -592,42 +592,51 @@ struct CropOverlay: View {
                 Rectangle()
                     .fill(Color.clear)
                     .allowsHitTesting(false)
-                Rectangle()
-                    .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
-                    .background(Rectangle().fill(Color.black.opacity(0.001)))
-                    .frame(width: draw.width, height: draw.height)
-                    .rotationEffect(.degrees(region.angle))
-                    .offset(x: draw.minX, y: draw.minY)
-                    .gesture(dragGesture(in: proxy.size, corner: nil))
-                    .onTapGesture { onSelect() }
 
-                Text("\(region.index)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: isSelected ? 26 : 22, height: isSelected ? 26 : 22)
-                    .background(activeColor)
-                    .clipShape(Circle())
-                    .position(x: draw.minX + 13, y: draw.minY + 13)
-                    .shadow(color: activeColor.opacity(isSelected ? 0.45 : 0), radius: 8, y: 2)
-                    .onTapGesture { onSelect() }
+                // The whole annotated box — stroke, index badge, delete button
+                // and corner handles — lives in the box's own local space and
+                // rotates as one unit about the box centre. That keeps every
+                // handle and label glued to a tilted frame's actual corners
+                // instead of leaving them square while only the stroke turns.
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
+                        .background(Rectangle().fill(Color.black.opacity(0.001)))
+                        .frame(width: draw.width, height: draw.height)
+                        .gesture(dragGesture(in: proxy.size, corner: nil))
+                        .onTapGesture { onSelect() }
 
-                Button {
-                    onDelete()
-                } label: {
-                    Image(systemName: "xmark")
+                    Text("\(region.index)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: isSelected ? 26 : 22, height: isSelected ? 26 : 22)
+                        .background(activeColor)
+                        .clipShape(Circle())
+                        .position(x: 13, y: 13)
+                        .shadow(color: activeColor.opacity(isSelected ? 0.45 : 0), radius: 8, y: 2)
+                        .onTapGesture { onSelect() }
+
+                    Button {
+                        onDelete()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(CropToolButtonStyle(destructive: true))
+                    .position(x: draw.width - 13, y: 13)
+                    .help("删除裁切框")
+
+                    ForEach(CropCorner.allCases) { corner in
+                        Circle()
+                            .fill(Color(red: 0.86, green: 0.91, blue: 0.96))
+                            .overlay(Circle().stroke(activeColor, lineWidth: isSelected ? 3 : 2))
+                            .frame(width: isSelected ? 16 : 14, height: isSelected ? 16 : 14)
+                            .position(corner.point(in: CGRect(origin: .zero, size: draw.size)))
+                            .gesture(dragGesture(in: proxy.size, corner: corner))
+                    }
                 }
-                .buttonStyle(CropToolButtonStyle(destructive: true))
-                .position(x: draw.maxX - 13, y: draw.minY + 13)
-                .help("删除裁切框")
-
-                ForEach(CropCorner.allCases) { corner in
-                    Circle()
-                        .fill(Color(red: 0.86, green: 0.91, blue: 0.96))
-                        .overlay(Circle().stroke(activeColor, lineWidth: isSelected ? 3 : 2))
-                        .frame(width: isSelected ? 16 : 14, height: isSelected ? 16 : 14)
-                        .position(corner.point(in: draw))
-                        .gesture(dragGesture(in: proxy.size, corner: corner))
-                }
+                .frame(width: draw.width, height: draw.height, alignment: .topLeading)
+                .rotationEffect(.degrees(region.angle))
+                .position(x: draw.midX, y: draw.midY)
             }
             .onChange(of: region.rect) { _, newValue in
                 workingRect = newValue
@@ -789,6 +798,9 @@ struct ParameterPanel: View {
                             AutoCandidatePicker()
                         }
                     }
+                    SettingsGroup("旋转校正") {
+                        CropAngleControl()
+                    }
                     CollapsibleGroup("高级 · 边距微调", isExpanded: $showMargins) {
                         VStack(spacing: 10) {
                             if let reference = store.recognitionMarginReference {
@@ -817,6 +829,68 @@ struct ParameterPanel: View {
             .padding(16)
             .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
         }
+    }
+}
+
+/// Panel control for the selected box's tilt. On first selecting a box it
+/// shows the system-detected angle; the 左旋转 / 右旋转 buttons nudge it 1° per
+/// click, clamped to ±15°. Every change is persisted as that single photo's
+/// parameter, so switching photos keeps the manual angle.
+struct CropAngleControl: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        let region = store.selectedCropRegion
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("当前框角度")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.muted)
+                Spacer()
+                Text(String(format: "%.0f°", region?.angle ?? 0))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.text)
+            }
+            HStack(spacing: 8) {
+                rotateButton(title: "左旋转", systemName: "arrow.counterclockwise", delta: -1, region: region)
+                rotateButton(title: "右旋转", systemName: "arrow.clockwise", delta: 1, region: region)
+            }
+            Text(caption(for: region))
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.muted)
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func rotateButton(title: String, systemName: String, delta: Double, region: CropRegion?) -> some View {
+        Button {
+            guard let region else { return }
+            let next = (region.angle + delta).clamped(to: -15...15)
+            store.updateSelectedCropAngle(regionID: region.id, angle: next)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                Text(title)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(region == nil ? AppTheme.blue.opacity(0.35) : AppTheme.blue)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .disabled(region == nil)
+    }
+
+    private func caption(for region: CropRegion?) -> String {
+        guard let region else { return "请选择一个裁切框" }
+        if region.isManual {
+            return "手动设置 · 切换后自动保存为单张参数"
+        }
+        return "系统识别角度，可微调（±15°，每次 1°）"
     }
 }
 
