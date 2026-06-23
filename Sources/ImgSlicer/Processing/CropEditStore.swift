@@ -1,4 +1,4 @@
-﻿import CoreGraphics
+import CoreGraphics
 import Foundation
 
 struct CropEditStore: Sendable {

@@ -1,4 +1,4 @@
-﻿import Foundation
+import Foundation
 
 enum CropDetectionStage: Sendable {
     case projectionSeparators

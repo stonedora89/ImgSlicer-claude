@@ -1,4 +1,4 @@
-﻿import Foundation
+import Foundation
 import CoreGraphics
 
 enum TaskStatus: String, CaseIterable, Identifiable, Sendable {

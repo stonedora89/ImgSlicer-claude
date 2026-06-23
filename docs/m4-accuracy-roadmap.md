@@ -1,4 +1,4 @@
-﻿# ImgSlicer 在 Mac mini M4 上的准确度、接口与性能优化路线图
+# ImgSlicer 在 Mac mini M4 上的准确度、接口与性能优化路线图
 
 ## 目标
 
