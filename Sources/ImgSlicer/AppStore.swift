@@ -352,44 +352,31 @@ final class AppStore: ObservableObject {
         applyCandidate(candidate, taskIndex: indexes.task, photoIndex: indexes.photo)
     }
 
+    /// Global margins are a batch baseline: a slider change re-bakes the margins
+    /// for every *auto* photo in the current task from its selected candidate.
+    /// Manual photos are local overrides and stay pinned — global margins never
+    /// touch them; they are tuned by dragging their boxes.
     func reapplySelectedCandidateMargins() {
         defer { lastMarginValues = MarginValues(settings: settings) }
-        guard let indexes = selectedIndexes() else { return }
+        guard let taskIndex = selectedTaskIndex() else { return }
 
-        if !tasks[indexes.task].photos[indexes.photo].isManual,
-           let candidateID = tasks[indexes.task].photos[indexes.photo].selectedCandidateID,
-           let candidate = tasks[indexes.task].photos[indexes.photo].cropCandidates.first(where: { $0.id == candidateID }) {
-            tasks[indexes.task].photos[indexes.photo].cropRegions = candidate.adjustedRegions(settings: settings)
-            editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
-            logMessage = "已按当前边距更新自动裁切框。"
-            logSubMessage = "\(candidate.title) · 上下左右边距已应用"
+        var applied = 0
+        for photoIndex in tasks[taskIndex].photos.indices {
+            guard !tasks[taskIndex].photos[photoIndex].isManual,
+                  let candidateID = tasks[taskIndex].photos[photoIndex].selectedCandidateID,
+                  let candidate = tasks[taskIndex].photos[photoIndex].cropCandidates.first(where: { $0.id == candidateID }) else { continue }
+            tasks[taskIndex].photos[photoIndex].cropRegions = candidate.adjustedRegions(settings: settings)
+            editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
+            applied += 1
+        }
+
+        guard applied > 0 else {
+            logMessage = "当前任务没有可应用边距的自动裁切框。"
+            logSubMessage = "手动调整过的图片保留本地结果，不随全局边距变化。"
             return
         }
-
-        let delta = MarginValues(settings: settings).delta(from: lastMarginValues)
-        guard delta.hasChange else { return }
-        tasks[indexes.task].photos[indexes.photo].cropRegions = tasks[indexes.task].photos[indexes.photo].cropRegions.map { region in
-            CropRegion(
-                id: region.id,
-                index: region.index,
-                rect: region.rect.expanded(
-                    top: delta.top / 2000,
-                    bottom: delta.bottom / 2000,
-                    left: delta.left / 2000,
-                    right: delta.right / 2000
-                ).normalizedCropRect,
-                angle: region.angle,
-                isManual: true
-            )
-        }
-        tasks[indexes.task].photos[indexes.photo].isManual = true
-        tasks[indexes.task].photos[indexes.photo].status = .manual
-        tasks[indexes.task].status = .needsReview
-        tasks[indexes.task].detail = "已按边距微调当前裁切框"
-        editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
-        saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
-        logMessage = "已按当前边距微调裁切框。"
-        logSubMessage = "当前图已保存为手动调整结果"
+        logMessage = "已按当前边距更新自动裁切框。"
+        logSubMessage = "本任务 \(applied) 张自动图已应用上下左右边距；手动图未改动。"
     }
 
     func saveSelectedSampleProfile() {

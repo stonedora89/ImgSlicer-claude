@@ -291,6 +291,21 @@ struct ImageProcessor: Sendable {
             )
         }
 
+        // Complete multi-row grids: add lattice cells detection missed because
+        // the frame had no subject/edges (e.g. a black frame at a row's end).
+        // Pure geometry, conservative; only adds cells, never moves boxes.
+        candidates = candidates.map { candidate in
+            let completed = completeGridLattice(candidate.regions)
+            guard completed.count > candidate.regions.count else { return candidate }
+            return CropCandidate(
+                title: candidate.title,
+                detail: candidate.detail,
+                regions: completed,
+                marginScale: candidate.marginScale,
+                score: candidate.score
+            )
+        }
+
         if candidates.isEmpty, !bestFallback.isEmpty {
             candidates.append(CropCandidate(
                 title: "单图裁切",
@@ -1340,6 +1355,104 @@ struct ImageProcessor: Sendable {
             output[item.offset] = CropRegion(index: item.element.index, rect: newRect.normalized, angle: item.element.angle, isManual: item.element.isManual)
         }
         return output
+    }
+
+    /// Fill in grid cells the layout implies but detection missed — e.g. a black
+    /// or subject-less frame at the end of a film-strip row that produced no
+    /// edges, so no box was ever created for it. Pure geometry: it groups the
+    /// detected boxes into rows, learns the column lattice (pitch/width/origin)
+    /// from the most-populated (fully-occupied) row, and adds any lattice cell a
+    /// row is missing. Conservative — it requires a clean multi-row grid whose
+    /// richest row is evenly spaced (so the true column count is known), never
+    /// moves existing boxes, never invents whole rows, and skips rows that don't
+    /// align to the lattice. Synthesized cells stay axis-aligned (angle 0): an
+    /// empty frame has no content to deskew.
+    private func completeGridLattice(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 4 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let medianH = median(rects.map { Double($0.height) })
+        guard medianH > 0 else { return regions }
+
+        // Group boxes into rows by vertical centre proximity.
+        let rowTol = medianH * 0.4
+        let order = regions.indices.sorted { Double(rects[$0].midY) < Double(rects[$1].midY) }
+        var rows: [[Int]] = []
+        for i in order {
+            if let ref = rows.last?.first, abs(Double(rects[i].midY) - Double(rects[ref].midY)) <= rowTol {
+                rows[rows.count - 1].append(i)
+            } else {
+                rows.append([i])
+            }
+        }
+        guard rows.count >= 2 else { return regions }
+
+        let medianW = median(rects.map { Double($0.width) })
+        guard medianW > 0.02 else { return regions }
+
+        // The richest row defines the column lattice. It must be evenly spaced,
+        // i.e. genuinely fully populated, so its cell count is the column count.
+        guard let richest = rows.max(by: { $0.count < $1.count }), richest.count >= 3 else { return regions }
+        let richCentres = richest.map { Double(rects[$0].midX) }.sorted()
+        let richGaps = zip(richCentres.dropFirst(), richCentres).map { $0 - $1 }
+        guard !richGaps.isEmpty else { return regions }
+        let pitch = median(richGaps)
+        guard pitch > medianW * 0.85, pitch < medianW * 1.8 else { return regions }
+        guard richGaps.allSatisfy({ $0 > pitch * 0.8 && $0 < pitch * 1.2 }) else { return regions }
+
+        let originX = richCentres.first!
+        let columnCount = richest.count
+        guard columnCount <= 24 else { return regions }
+        func columnCentre(_ c: Int) -> Double { originX + Double(c) * pitch }
+
+        var added: [CropRegion] = []
+        for row in rows {
+            // Only synthesize for rows that cleanly align to the lattice.
+            var occupied = Set<Int>()
+            var aligned = true
+            for idx in row {
+                let c = Int(((Double(rects[idx].midX) - originX) / pitch).rounded())
+                if c < 0 || c >= columnCount || occupied.contains(c) { aligned = false; break }
+                occupied.insert(c)
+            }
+            guard aligned, occupied.count < columnCount else { continue }
+
+            let rRects = row.map { rects[$0] }
+            let topC = median(rRects.map { Double($0.minY) })
+            let botC = median(rRects.map { Double($0.maxY) })
+            guard botC - topC > 0.02 else { continue }
+
+            for c in 0..<columnCount where !occupied.contains(c) {
+                let x = max(0, columnCentre(c) - medianW / 2)
+                let w = min(medianW, 1 - x)
+                let y = max(0, topC)
+                let h = min(botC, 1) - y
+                guard w > 0.02, h > 0.02 else { continue }
+                let rect = CGRect(x: x, y: y, width: w, height: h).normalized
+                // Never duplicate a box that already covers this cell.
+                let overlaps = regions.contains { existing in
+                    let e = existing.rect.normalized
+                    let iw = max(0, min(Double(e.maxX), Double(rect.maxX)) - max(Double(e.minX), Double(rect.minX)))
+                    let ih = max(0, min(Double(e.maxY), Double(rect.maxY)) - max(Double(e.minY), Double(rect.minY)))
+                    return iw * ih > 0.4 * Double(rect.width * rect.height)
+                }
+                if !overlaps {
+                    added.append(CropRegion(index: 0, rect: rect, angle: 0, isManual: false))
+                }
+            }
+        }
+        guard !added.isEmpty else { return regions }
+
+        // Re-sort row-major (top-to-bottom, then left-to-right) and re-index.
+        let merged = (regions + added).sorted {
+            let a = $0.rect.normalized, b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > rowTol { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        return merged.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
+        }
     }
 
     /// Per-frame edge reliability in [0,1] for [left, right, top, bottom]: how
