@@ -116,7 +116,7 @@ struct FilmDeskewValidationTests {
         photo.cropRegions = [
             CropRegion(index: 1, rect: CGRect(x: 0.2, y: 0.2, width: 0.4, height: 0.4), angle: 2.5, isManual: true)
         ]
-        photo.isManual = true
+        photo.hasLocalOverrides = true
         let task = FolderTask(
             rootURL: root,
             displayName: "test",
@@ -139,7 +139,7 @@ struct FilmDeskewValidationTests {
         )
         let restored = store.restoredTask(freshTask)
 
-        #expect(restored.photos[0].isManual == false)
+        #expect(restored.photos[0].hasLocalOverrides == false)
         #expect(restored.photos[0].cropRegions[0].rect == freshRect)
         #expect(restored.photos[0].cropRegions[0].angle == 0)
     }

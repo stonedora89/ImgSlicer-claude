@@ -39,24 +39,24 @@ struct AppShell: View {
             loadDroppedURLs(providers)
         }
         .alert(
-            "璇ュ浘鐗囨湁鎵嬪姩淇",
+            "该图片有手动修正",
             isPresented: Binding(
                 get: { store.manualRedetectPrompt != nil },
                 set: { if !$0 { store.manualRedetectPrompt = nil } }
             ),
             presenting: store.manualRedetectPrompt
         ) { _ in
-            Button("閲嶆柊璇嗗埆锛堜涪寮冩墜鍔ㄤ慨姝ｏ級", role: .destructive) {
+            Button("重新识别（丢弃手动修正）", role: .destructive) {
                 store.confirmManualRedetect()
             }
             Button("淇濈暀鎵嬪姩淇", role: .cancel) {
                 store.manualRedetectPrompt = nil
             }
         } message: { prompt in
-            Text("銆孿(prompt.photoName)銆嶅凡琚墜鍔ㄨ皟鏁淬€傞噸鏂拌瘑鍒細鐢ㄨ嚜鍔ㄧ粨鏋滄浛鎹㈣繖浜涙墜鍔ㄦ锛屼笖鏃犳硶鎾ら攢銆?)
+            Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
         }
         .alert(
-            store.startProcessingPrompt?.title ?? "寮€濮嬪鐞?,
+            store.startProcessingPrompt?.title ?? "开始处理",
             isPresented: Binding(
                 get: { store.startProcessingPrompt != nil },
                 set: { if !$0 { store.startProcessingPrompt = nil } }
@@ -64,14 +64,14 @@ struct AppShell: View {
             presenting: store.startProcessingPrompt
         ) { prompt in
             if prompt.canStart {
-                Button("寮€濮嬪鐞?\(prompt.waitingCount) 涓换鍔?) {
+                Button("开始处理 \(prompt.waitingCount) 个任务") {
                     store.confirmStartProcessing()
                 }
                 Button("鍙栨秷", role: .cancel) {
                     store.startProcessingPrompt = nil
                 }
             } else {
-                Button("鐭ラ亾浜?, role: .cancel) {
+                Button("知道了", role: .cancel) {
                     store.startProcessingPrompt = nil
                 }
             }
@@ -81,7 +81,7 @@ struct AppShell: View {
     }
 
     /// Invisible buttons whose keyboard shortcuts work whenever the window is
-    /// key 鈥?unlike `.onKeyPress`, they don't depend on a particular subview
+    /// key — unlike `.onKeyPress`, they don't depend on a particular subview
     /// holding focus, so Delete/Esc fire even after the user has clicked a box
     /// on the canvas. Disabled when not applicable so the keystroke falls
     /// through instead of being silently swallowed.
@@ -175,7 +175,7 @@ struct BrandLockup: View {
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(AppTheme.text)
                     .lineLimit(1)
-                Text("鎵归噺搴曠墖鍒囧垎涓庤竟鐣屽井璋?)
+                Text("批量底片切分与边界微调")
                     .font(.system(size: 11.5))
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)
@@ -192,7 +192,7 @@ struct QueuePanel: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("浠诲姟鍒楄〃")
+                Text("任务列表")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button {
@@ -201,7 +201,7 @@ struct QueuePanel: View {
                     Image(systemName: "folder.badge.plus")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("杩藉姞瀵煎叆鍥剧墖鎴栨枃浠跺す")
+                .help("追加导入图片或文件夹")
 
                 Button {
                     store.clearFinishedAndIdle()
@@ -209,7 +209,7 @@ struct QueuePanel: View {
                     Image(systemName: "eraser")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("娓呯悊鎵€鏈変换鍔★紙澶勭悊涓殑闄ゅ锛?)
+                .help("清理所有任务（处理中的除外）")
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
@@ -258,7 +258,7 @@ struct FolderTaskRow: View {
                     Text(task.displayName)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                    Text("\(task.imageCount) 寮犲浘鐗?路 \(task.detail)\n宸插鐞?\(task.processedCount) / \(task.imageCount)")
+                    Text("\(task.imageCount) 张图片 · \(task.detail)\n已处理 \(task.processedCount) / \(task.imageCount)")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
                         .lineLimit(2)
@@ -272,7 +272,7 @@ struct FolderTaskRow: View {
                         Image(systemName: "folder")
                     }
                     .buttonStyle(IconButtonStyle())
-                    .help(task.status == .done ? "鎵撳紑杈撳嚭鏂囦欢澶? : "鎵撳紑鍘熷鏂囦欢澶?)
+                    .help(task.status == .done ? "打开输出文件夹" : "打开原始文件夹")
                 }
             }
 
@@ -362,7 +362,7 @@ struct PreviewWorkspace: View {
                         Image(systemName: "photo.on.rectangle.angled")
                             .font(.system(size: 42))
                             .foregroundStyle(AppTheme.muted)
-                        Text("鎷栧叆鏂囦欢澶规垨鐐瑰嚮瀵煎叆寮€濮?)
+                        Text("拖入文件夹或点击导入开始")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(AppTheme.text)
                     }
@@ -371,16 +371,16 @@ struct PreviewWorkspace: View {
                 VStack {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("褰撳墠鍥剧墖锛歕(store.selectedPhoto?.name ?? "鏈€夋嫨")")
+                            Text("当前图片：\(store.selectedPhoto?.name ?? "未选择")")
                                 .font(.system(size: 14, weight: .bold))
                             if let folder = store.selectedTask?.displayName {
-                                Text("褰撳墠鏂囦欢澶癸細\(folder)")
+                                Text("当前文件夹：\(folder)")
                                     .font(.system(size: 11))
                                     .foregroundStyle(AppTheme.muted)
                             }
                         }
                         Spacer()
-                        Text(store.selectedPhoto?.status.rawValue ?? "绛夊緟瀵煎叆")
+                        Text(store.selectedPhoto?.status.rawValue ?? "等待导入")
                             .font(.system(size: 11))
                             .padding(.horizontal, 12)
                             .frame(height: 32)
@@ -560,7 +560,7 @@ struct MultiCropOverlay: View {
                     onChange(region.id, rect)
                 }
                 // Selected box floats above its neighbours so overlapping frames
-                // never steal the drag 鈥?you always manipulate the one you picked.
+                // never steal the drag — you always manipulate the one you picked.
                 .zIndex(region.id == selectedRegionID ? 1 : 0)
             }
         }
@@ -586,15 +586,15 @@ struct CropOverlay: View {
             )
 
             ZStack(alignment: .topLeading) {
-                // Full-canvas spacer only 鈥?must not capture hits, otherwise the
+                // Full-canvas spacer only — must not capture hits, otherwise the
                 // top-most frame's transparent fill would swallow drags meant for
                 // a box underneath it.
                 Rectangle()
                     .fill(Color.clear)
                     .allowsHitTesting(false)
 
-                // The whole annotated box 鈥?stroke, index badge, delete button
-                // and corner handles 鈥?lives in the box's own local space and
+                // The whole annotated box — stroke, index badge, delete button
+                // and corner handles — lives in the box's own local space and
                 // rotates as one unit about the box centre. That keeps every
                 // handle and label glued to a tilted frame's actual corners
                 // instead of leaving them square while only the stroke turns.
@@ -623,7 +623,7 @@ struct CropOverlay: View {
                     }
                     .buttonStyle(CropToolButtonStyle(destructive: true))
                     .position(x: draw.width - 13, y: 13)
-                    .help("鍒犻櫎瑁佸垏妗?)
+                    .help("删除裁切框")
 
                     ForEach(CropCorner.allCases) { corner in
                         Circle()
@@ -733,7 +733,7 @@ struct ViewerLog: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("瀵煎叆缁熻")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("\(summary.folderCount) 涓枃浠跺す 路 \(summary.subfolderCount) 涓瓙鏂囦欢澶筡n\(summary.imageCount) 寮犲浘鐗?)
+                    Text("\(summary.folderCount) 个文件夹 · \(summary.subfolderCount) 个子文件夹\n\(summary.imageCount) 张图片")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
                 }
@@ -766,7 +766,7 @@ struct ParameterPanel: View {
     private var content: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("鍙傛暟璁剧疆")
+                Text("参数设置")
                     .font(.system(size: 15, weight: .bold))
                 HStack(spacing: 7) {
                     Button {
@@ -776,7 +776,7 @@ struct ParameterPanel: View {
                     }
                     .buttonStyle(AccentIconButtonStyle(color: store.isDrawingNewRegion ? AppTheme.green : AppTheme.orange))
                     .disabled(store.selectedPhoto == nil)
-                    .help("妗嗛€夋柊澧烇細鐐逛寒鍚庡湪棰勮鍥句笂鎷栧嚭涓€涓柊鐨勮鍒囨锛圗sc 鍙栨秷锛?)
+                    .help("框选新增：点亮后在预览图上拖出一个新的裁切框（Esc 取消）")
 
                     Button {
                         store.redetectSelectedPhoto()
@@ -812,16 +812,16 @@ struct ParameterPanel: View {
                     SettingsGroup("鏃嬭浆鏍℃") {
                         CropAngleControl()
                     }
-                    CollapsibleGroup("楂樼骇 路 杈硅窛寰皟", isExpanded: $showMargins) {
+                    CollapsibleGroup("高级 · 边距微调", isExpanded: $showMargins) {
                         VStack(spacing: 10) {
                             if let reference = store.recognitionMarginReference {
                                 RecognitionMarginReferenceView(reference: reference)
                             }
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                MarginField(title: "涓婅竟璺?, value: $store.settings.top)
-                                MarginField(title: "涓嬭竟璺?, value: $store.settings.bottom)
-                                MarginField(title: "宸﹁竟璺?, value: $store.settings.left)
-                                MarginField(title: "鍙宠竟璺?, value: $store.settings.right)
+                                MarginField(title: "右边距", value: $store.settings.right)
+                                MarginField(title: "右边距", value: $store.settings.right)
+                                MarginField(title: "右边距", value: $store.settings.right)
+                                MarginField(title: "右边距", value: $store.settings.right)
                             }
                         }
                     }
@@ -835,7 +835,7 @@ struct ParameterPanel: View {
                 Image(systemName: "play.circle.fill")
             }
             .buttonStyle(StartProcessButtonStyle())
-            .help("鎸夊綋鍓嶈鍒囨寮€濮嬫壒閲忚緭鍑?)
+            .help("按当前裁切框开始批量输出")
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(16)
             .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
@@ -854,17 +854,17 @@ struct CropAngleControl: View {
         let region = store.selectedCropRegion
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("褰撳墠妗嗚搴?)
+                Text("当前框角度")
                     .font(.system(size: 11))
                     .foregroundStyle(AppTheme.muted)
                 Spacer()
-                Text(String(format: "%.0f掳", region?.angle ?? 0))
+                Text(String(format: "%.0f°", region?.angle ?? 0))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.text)
             }
             HStack(spacing: 8) {
-                rotateButton(title: "宸︽棆杞?, systemName: "arrow.counterclockwise", delta: -1, region: region)
-                rotateButton(title: "鍙虫棆杞?, systemName: "arrow.clockwise", delta: 1, region: region)
+                rotateButton(title: "右旋转", systemName: "arrow.clockwise", delta: 1, region: region)
+                rotateButton(title: "右旋转", systemName: "arrow.clockwise", delta: 1, region: region)
             }
             Text(caption(for: region))
                 .font(.system(size: 10))
@@ -897,11 +897,11 @@ struct CropAngleControl: View {
     }
 
     private func caption(for region: CropRegion?) -> String {
-        guard let region else { return "璇烽€夋嫨涓€涓鍒囨" }
+        guard let region else { return "请选择一个裁切框" }
         if region.isManual {
-            return "鎵嬪姩璁剧疆 路 鍒囨崲鍚庤嚜鍔ㄤ繚瀛樹负鍗曞紶鍙傛暟"
+            return "手动设置 · 切换后自动保存为单张参数"
         }
-        return "绯荤粺璇嗗埆瑙掑害锛屽彲寰皟锛埪?5掳锛屾瘡娆?1掳锛?
+        return "系统识别角度，可微调（±15°，每次 1°）"
     }
 }
 
@@ -911,7 +911,7 @@ struct AutoCandidatePicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("鍊欓€夋晥鏋?)
+                Text("候选效果")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(AppTheme.muted)
                 Spacer()
@@ -927,7 +927,7 @@ struct AutoCandidatePicker: View {
                                 CandidateRow(
                                     icon: photo.selectedCandidateID == candidate.id ? "checkmark.circle.fill" : "circle",
                                     title: candidate.title,
-                                    detail: "\(candidate.detail) 路 鍙俊搴?\(Int(candidate.score * 100))%"
+                                    detail: "\(candidate.detail) · 可信度 \(Int(candidate.score * 100))%"
                                 )
                             }
                             .buttonStyle(CandidateButtonStyle(active: photo.selectedCandidateID == candidate.id))
@@ -936,8 +936,8 @@ struct AutoCandidatePicker: View {
                 } else if !photo.cropRegions.isEmpty {
                     CandidateRow(
                         icon: "checkmark.circle.fill",
-                        title: "褰撳墠瑁佸垏妗?,
-                        detail: "宸蹭繚鐣欏綋鍓嶇粨鏋滐紝鍙噸鏂扮敓鎴愯嚜鍔ㄦ晥鏋?
+                        title: "当前裁切框",
+                        detail: "已保留当前结果，可重新生成自动效果"
                     )
                     .padding(.horizontal, 10)
                     .frame(maxWidth: .infinity)
@@ -950,7 +950,7 @@ struct AutoCandidatePicker: View {
                     }
                 }
             } else {
-                Text("閫夋嫨鍥剧墖鍚庣敓鎴愯嚜鍔ㄦ晥鏋?)
+                Text("选择图片后生成自动效果")
                     .font(.system(size: 11))
                     .foregroundStyle(AppTheme.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -962,7 +962,7 @@ struct AutoCandidatePicker: View {
     }
 }
 
-/// A SettingsGroup whose body collapses behind a tappable header 鈥?used to tuck
+/// A SettingsGroup whose body collapses behind a tappable header — used to tuck
 /// rarely-needed advanced controls out of the default view.
 struct CollapsibleGroup<Content: View>: View {
     let title: String
@@ -1032,12 +1032,12 @@ struct Filmstrip: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                Text("鍥剧墖鑳剁墖鏍?)
+                Text("图片胶片栏")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 HStack(spacing: 6) {
                     Circle().fill(AppTheme.green).frame(width: 6, height: 6)
-                    Text("\(store.tasks.filter { $0.status == .running }.count) 涓繍琛屼腑 路 \(store.tasks.filter { $0.status == .waiting }.count) 涓瓑寰?)
+                    Text("\(store.tasks.filter { $0.status == .running }.count) 个运行中 · \(store.tasks.filter { $0.status == .waiting }.count) 个等待")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
                 }
@@ -1050,7 +1050,7 @@ struct Filmstrip: View {
                 }
                 .buttonStyle(FilmstripNavButtonStyle())
                 .disabled(!canMovePrevious)
-                .help("涓婁竴寮?)
+                .help("上一张")
 
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -1078,7 +1078,7 @@ struct Filmstrip: View {
                 }
                 .buttonStyle(FilmstripNavButtonStyle())
                 .disabled(!canMoveNext)
-                .help("涓嬩竴寮?)
+                .help("下一张")
             }
         }
         .padding(.horizontal, 16)
@@ -1165,7 +1165,7 @@ struct DropZoneOverlay: View {
                 RoundedRectangle(cornerRadius: 22)
                     .stroke(AppTheme.blue, style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
                     .padding(34)
-                Text("鏉惧紑鍚庡鍏ユ枃浠跺す骞堕€掑綊璇嗗埆鍥剧墖")
+                Text("暂无任务")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(AppTheme.text)
             }
@@ -1184,9 +1184,9 @@ struct EmptyQueueView: View {
             VStack(spacing: 10) {
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 34))
-                Text("鏆傛棤浠诲姟")
+                Text("暂无任务")
                     .font(.system(size: 13, weight: .semibold))
-                Text("鐐瑰嚮姝ゅ瀵煎叆锛屾垨鎷栧叆鏂囦欢澶?/ 鍥剧墖")
+                Text("点击此处导入，或拖入文件夹 / 图片")
                     .font(.system(size: 11))
                     .foregroundStyle(AppTheme.muted)
                     .multilineTextAlignment(.center)
@@ -1210,7 +1210,7 @@ struct EmptyQueueView: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("鐐瑰嚮鎵撳紑瀵煎叆锛屾垨鎶婃枃浠跺す / 鍥剧墖鎷栧埌杩欓噷")
+        .help("点击打开导入，或把文件夹 / 图片拖到这里")
     }
 }
 
@@ -1255,10 +1255,10 @@ struct RecognitionMarginReferenceView: View {
                     .foregroundStyle(AppTheme.muted)
             }
             HStack(spacing: 6) {
-                ReferenceValue(label: "涓?, value: reference.top)
-                ReferenceValue(label: "涓?, value: reference.bottom)
-                ReferenceValue(label: "宸?, value: reference.left)
-                ReferenceValue(label: "鍙?, value: reference.right)
+                ReferenceValue(label: "右", value: reference.right)
+                ReferenceValue(label: "右", value: reference.right)
+                ReferenceValue(label: "右", value: reference.right)
+                ReferenceValue(label: "右", value: reference.right)
             }
         }
         .padding(10)
@@ -1363,7 +1363,7 @@ enum AppTheme {
     static let green = Color(red: 0.31, green: 0.65, blue: 0.55)
     static let orange = Color(red: 0.9, green: 0.55, blue: 0.26)
     /// Cycled across adjacent crop frames so neighbouring boxes never share a
-    /// colour 鈥?overlaps and mis-cuts stand out at a glance. Orange is reserved
+    /// colour — overlaps and mis-cuts stand out at a glance. Orange is reserved
     /// for the selected frame, so it's deliberately excluded here.
     static let frameColors: [Color] = [
         Color(red: 0.37, green: 0.53, blue: 0.72),   // blue
@@ -1508,18 +1508,20 @@ struct CandidateButtonStyle: ButtonStyle {
 }
 
 struct TemplateRetileButtonStyle: ButtonStyle {
+    var primary = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color(red: 0.78, green: 0.83, blue: 0.89))
+            .foregroundStyle(primary ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
             .frame(height: 36)
-            .background(Color.white.opacity(configuration.isPressed ? 0.075 : 0.035))
+            .background(primary ? AppTheme.blue.opacity(configuration.isPressed ? 0.26 : 0.16) : Color.white.opacity(configuration.isPressed ? 0.075 : 0.035))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(0.08))
+                    .stroke(primary ? AppTheme.blue.opacity(0.42) : Color.white.opacity(0.08))
             }
     }
 }

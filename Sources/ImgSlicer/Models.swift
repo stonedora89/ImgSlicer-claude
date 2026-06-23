@@ -2,19 +2,19 @@
 import CoreGraphics
 
 enum TaskStatus: String, CaseIterable, Identifiable, Sendable {
-    case waiting = "绛夊緟涓?"
-    case running = "澶勭悊涓?"
+    case waiting = "等待中"
+    case running = "处理中"
     case needsReview = "闇€纭"
-    case done = "宸插畬鎴?"
+    case done = "已完成"
 
     var id: String { rawValue }
 }
 
 enum PhotoStatus: String, Sendable {
-    case pending = "寰呭鐞?"
-    case locating = "瀹氫綅涓?"
-    case located = "宸插畾浣?"
-    case running = "澶勭悊涓?"
+    case pending = "待处理"
+    case locating = "定位中"
+    case located = "已定位"
+    case running = "处理中"
     case autoDone = "鑷姩瀹屾垚"
     case manual = "鎵嬪姩寰皟"
     case failed = "闇€纭"
@@ -30,13 +30,13 @@ enum OrientationMode: String, CaseIterable, Identifiable, Sendable {
 enum CropBusinessProfile: String, CaseIterable, Identifiable, Codable, Sendable {
     case balanced = "鍧囪　"
     case filmScan = "鑳剁墖鎵弿"
-    case gridPhoto = "澶氬鏍肩収鐗?"
+    case gridPhoto = "多宫格照片"
 
     var id: String { rawValue }
 }
 
 enum ImagePreprocessMode: String, CaseIterable, Identifiable, Sendable {
-    case original = "鍘熷浘"
+    case original = "原图"
     case highContrast = "澧炲己"
     case mask = "钂欑増"
     case inverted = "鍙嶈浆"
@@ -46,13 +46,13 @@ enum ImagePreprocessMode: String, CaseIterable, Identifiable, Sendable {
 
 enum CropAlgorithmMode: String, CaseIterable, Identifiable, Sendable {
     case automatic = "鑷姩"
-    case projectionSeparators = "鍒嗛殧绾?"
-    case filmFrames = "鑳剁墖妗?"
+    case projectionSeparators = "分隔线"
+    case filmFrames = "胶片框"
     case visionRectangles = "鐭╁舰"
     case foregroundComponents = "涓讳綋"
-    case localContrastComponents = "灞€閮ㄥ姣?"
-    case externalDetector = "鏅鸿兘璇嗗埆"
-    case darkGutters = "鏆楀尯缃戞牸"
+    case localContrastComponents = "局部对比"
+    case externalDetector = "智能识别"
+    case darkGutters = "暗区网格"
 
     var id: String { rawValue }
 }
@@ -128,7 +128,7 @@ struct FolderTask: Identifiable, Sendable {
     let imageCount: Int
     let folderCount: Int
     var status: TaskStatus = .waiting
-    var detail: String = "绛夊緟寮€濮嬪鐞?"
+    var detail: String = "等待开始处理"
     var processedCount: Int = 0
     var photos: [PhotoItem]
 

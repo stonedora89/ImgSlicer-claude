@@ -148,8 +148,13 @@ SCRIPT
 
 chmod +x "$INSTALLER_PATH"
 
+# `ditto` can preserve Finder resource-fork sidecars as `._*` files. They are
+# not needed by the app or installer and make shared zip packages look broken
+# when opened on non-macOS systems.
+find "$RELEASE_DIR" -name '._*' -type f -delete
+
 ditto "$APP_DIR" "$LATEST_APP_DIR"
-ditto -c -k --keepParent "$RELEASE_DIR" "$ZIP_PATH"
+ditto --norsrc --noextattr --noqtn --noacl -c -k --keepParent "$RELEASE_DIR" "$ZIP_PATH"
 
 echo "$APP_DIR"
 echo "$ZIP_PATH"

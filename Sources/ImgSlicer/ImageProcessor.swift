@@ -132,7 +132,7 @@ struct ImageProcessor: Sendable {
         var contactSheetRects = detectContactSheetFrames(luminances: baseLuminances(), width: width, height: height, settings: settings)
         if contactSheetRects.count >= 20 {
             // The contact-sheet path emits a single candidate, so sample
-            // guidance can't re-rank its way to a better box 鈥?fuse the sample
+            // guidance can't re-rank its way to a better box — fuse the sample
             // here instead, calibrating each cell's size to the dimensions the
             // user's correction taught us.
             contactSheetRects = calibratedToSample(contactSheetRects, sampleProfiles: sampleProfiles)
@@ -148,7 +148,7 @@ struct ImageProcessor: Sendable {
             candidates = candidates.map { candidate in
                 CropCandidate(
                     title: "鎺ヨЕ鍗版牱涓讳綋",
-                    detail: "鑷姩璇嗗埆鍒?\(regions.count) 涓富浣撳尯鍩?,
+                    detail: "自动识别到 \(regions.count) 个主体区域",
                     regions: candidate.regions,
                     marginScale: 0,
                     score: 0.99
@@ -223,7 +223,7 @@ struct ImageProcessor: Sendable {
         candidates = sampleGuidedCandidates(candidates, sampleProfiles: sampleProfiles)
         candidates = rankedCandidates(candidates, limit: performance.maxCandidateCount)
 
-        // Snap each frame's vertical edges to the true gutter鈫攃ontent boundary
+        // Snap each frame's vertical edges to the true gutter↔content boundary
         // at full resolution. The ~600px split confuses a thin black gutter
         // with dark textured content, so left edges either keep the gutter or
         // cut into the subject; the snap fixes both directions.
@@ -244,7 +244,7 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
-                // For a left/right edge with NO pixel evidence (reliability ~0 鈥?
+                // For a left/right edge with NO pixel evidence (reliability ~0 —
                 // a dark subject with no detectable gutter), fall back to the
                 // strip's regular grid position. Strictly gated: only no-evidence
                 // edges that also break the rhythm are moved; edges the snap
@@ -310,8 +310,8 @@ struct ImageProcessor: Sendable {
 
         if candidates.isEmpty, !bestFallback.isEmpty {
             candidates.append(CropCandidate(
-                title: "鍗曞浘瑁佸垏",
-                detail: "璇嗗埆鍒?1 涓富瑕佸尯鍩?,
+                title: "单图裁切",
+                detail: "识别到 1 个主要区域",
                 regions: bestFallback,
                 marginScale: 1,
                 score: score(regions: bestFallback)
@@ -349,9 +349,9 @@ struct ImageProcessor: Sendable {
 
         let variants: [(String, String, Double)]
         if preferred {
-            variants = [("鑷姩鏈€浣?, "\(stage.displayName) / \(preprocessMode.rawValue) 路 \(base.count) 涓尯鍩?, 1)]
+            variants = [("\(stage.displayName)", "\(preprocessMode.rawValue) · \(base.count) 个区域", 1)]
         } else {
-            variants = [("\(stage.displayName)", "\(preprocessMode.rawValue) 路 \(base.count) 涓尯鍩?, 1)]
+            variants = [("\(stage.displayName)", "\(preprocessMode.rawValue) · \(base.count) 个区域", 1)]
         }
 
         for variant in variants {
@@ -375,7 +375,7 @@ struct ImageProcessor: Sendable {
             let similarity = profiles.map { sampleSimilarity(candidate: candidate, profile: $0) }.max() ?? 0
             let guidedScore = min(1, candidate.score * 0.78 + similarity * 0.22)
             let detail = similarity > 0.58
-                ? "\(candidate.detail) 路 鏍锋湰鍖归厤 \(Int(similarity * 100))%"
+                ? "\(candidate.detail) · 样本匹配 \(Int(similarity * 100))%"
                 : candidate.detail
             return CropCandidate(
                 title: candidate.title,
@@ -767,8 +767,8 @@ struct ImageProcessor: Sendable {
     private func fallbackCandidates(settings: CropSettings) -> [CropCandidate] {
         [
             CropCandidate(
-                title: "鏁村浘鐣欒竟",
-                detail: "鏈瘑鍒埌绋冲畾鍒嗛殧锛屽厛鎸夎竟璺濊鍒?,
+                title: "整图留边",
+                detail: "未识别到稳定分隔，先按边距裁切",
                 regions: [CropRegion(index: 1, rect: marginRect(settings))],
                 marginScale: 0,
                 score: 0
@@ -1089,7 +1089,7 @@ struct ImageProcessor: Sendable {
     }
 
     /// Cuts out a tilted frame and rotates it upright. `normalizedRect` is the
-    /// un-rotated box (0鈥?, top-left origin); `angleDegrees` is its tilt about
+    /// un-rotated box (0…1, top-left origin); `angleDegrees` is its tilt about
     /// the box centre. The output is the box's content, deskewed.
     private func rotatedCrop(_ src: CGImage, normalizedRect rect: CGRect, angleDegrees: Double) -> CGImage? {
         let imgW = Double(src.width)
@@ -1245,33 +1245,33 @@ struct ImageProcessor: Sendable {
 
     // Shadow-lift LUT (gamma 0.45): expands dark tones so the texture of dark
     // *content* (shaded wood, deep shadow) becomes visible, while a flat black
-    // gutter stays flat. This is a detection-only transform 鈥?output crops use
-    // the original pixels 鈥?exactly the "temporarily brighten to recognise"
+    // gutter stays flat. This is a detection-only transform — output crops use
+    // the original pixels — exactly the "temporarily brighten to recognise"
     // idea, applied to the analysis buffer.
     private static let shadowLiftLUT: [Double] = (0..<256).map { pow(Double($0) / 255.0, 0.45) * 255.0 }
 
-    /// Snap each frame's left/right edge to the true gutter鈫攃ontent transition.
+    /// Snap each frame's left/right edge to the true gutter↔content transition.
     ///
     /// The split step (run at ~600px) can't tell a thin black gutter from dark
     /// textured content, so an edge may keep the gutter (too loose) or sit
     /// inside the subject (too tight). Working at full resolution and on
     /// shadow-lifted values, every column is classed as flat *gutter* (dark and
     /// textureless) or *content* (textured). The edge is then moved either
-    /// inward 鈥?off a gutter onto the first content 鈥?or outward 鈥?back across
-    /// dark-but-textured content until the real gutter 鈥?so both failure
+    /// inward — off a gutter onto the first content — or outward — back across
+    /// dark-but-textured content until the real gutter — so both failure
     /// directions converge on the same boundary.
     /// Pull frames that break a film strip's regular rhythm back onto the grid.
     ///
     /// A roll's frames share one pitch (left-edge to left-edge) and one width,
-    /// so the consistent majority of frames defines a grid; an outlier 鈥?a frame
+    /// so the consistent majority of frames defines a grid; an outlier — a frame
     /// whose width or position deviates (because the split mis-cut it and the
-    /// edge snap had no clean gutter to lock onto) 鈥?is replaced by its grid
+    /// edge snap had no clean gutter to lock onto) — is replaced by its grid
     /// prediction. Conservative: it only fires on a clearly single-row strip
     /// where most frames already agree, and only moves the outliers.
     /// Last-resort placement for an edge with NO pixel evidence: when a left or
     /// right edge's reliability is ~0 (a dark subject with no detectable gutter,
     /// where the snap had nothing to lock onto), put it at the strip's regular
-    /// grid position. The consensus idea applied safely 鈥?it ONLY moves edges
+    /// grid position. The consensus idea applied safely — it ONLY moves edges
     /// the reliability flags as evidence-free that ALSO break the rhythm, so an
     /// edge snapped to a real gutter is never overridden. Top/bottom are left
     /// alone (low reliability there is tilt, not a placement error).
@@ -1367,8 +1367,8 @@ struct ImageProcessor: Sendable {
         guard consistent.count >= max(3, (rects.count * 2 + 2) / 3) else { return regions }
 
         // The frames of a single row also share one top and one bottom edge, so
-        // a frame whose top/bottom broke from the row 鈥?e.g. a bright sky top
-        // that edge-trimming mistook for the film border and cut into 鈥?is
+        // a frame whose top/bottom broke from the row — e.g. a bright sky top
+        // that edge-trimming mistook for the film border and cut into — is
         // snapped back to the row's consensus top/bottom.
         let tops = rects.map { Double($0.minY) }
         let bottoms = rects.map { Double($0.maxY) }
@@ -1401,12 +1401,12 @@ struct ImageProcessor: Sendable {
         return output
     }
 
-    /// Fill in grid cells the layout implies but detection missed 鈥?e.g. a black
+    /// Fill in grid cells the layout implies but detection missed — e.g. a black
     /// or subject-less frame at the end of a film-strip row that produced no
     /// edges, so no box was ever created for it. Pure geometry: it groups the
     /// detected boxes into rows, learns the column lattice (pitch/width/origin)
     /// from the most-populated (fully-occupied) row, and adds any lattice cell a
-    /// row is missing. Conservative 鈥?it requires a clean multi-row grid whose
+    /// row is missing. Conservative — it requires a clean multi-row grid whose
     /// richest row is evenly spaced (so the true column count is known), never
     /// moves existing boxes, never invents whole rows, and skips rows that don't
     /// align to the lattice. Synthesized cells stay axis-aligned (angle 0): an
@@ -1500,7 +1500,7 @@ struct ImageProcessor: Sendable {
     }
 
     /// Per-frame edge reliability in [0,1] for [left, right, top, bottom]: how
-    /// cleanly each edge sits at a gutter鈫抍ontent transition 鈥?film gutter just
+    /// cleanly each edge sits at a gutter→content transition — film gutter just
     /// OUTSIDE the box, photographic content just INSIDE. A clean boundary scores
     /// high; an edge cut into the subject (no gutter outside) or one that still
     /// includes gutter (no content inside) scores low. This is the trust signal
@@ -1594,7 +1594,7 @@ struct ImageProcessor: Sendable {
     }
 
     /// Split a frame that actually holds two (or more) photos because the 600px
-    /// pass missed the dark gutter between them 鈥?common when both neighbours
+    /// pass missed the dark gutter between them — common when both neighbours
     /// are dark (an aquarium strip). A frame much wider than the strip's median
     /// is a merge of k鈮坵idth/median photos; the hidden gutter near each expected
     /// boundary is recovered at full resolution (the darkest flat column) and
@@ -1671,9 +1671,9 @@ struct ImageProcessor: Sendable {
         let cap = max(1, Int(medianWidth * 0.30))
 
         // Classify a column on a per-frame auto-levelled view: each value is
-        // contrast-stretched into the frame's own 2鈥?8% range (lo鈥o+span). In a
-        // very dark frame (an aquarium) the subject sits in raw 10鈥?0 with tiny
-        // raw variance 鈥?indistinguishable from the black gutter 鈥?but stretching
+        // contrast-stretched into the frame's own 2–98% range (lo…lo+span). In a
+        // very dark frame (an aquarium) the subject sits in raw 10–20 with tiny
+        // raw variance — indistinguishable from the black gutter — but stretching
         // the frame's own range reveals its texture, so dark CONTENT separates
         // from the still-flat gutter. `lut` (shadow lift) is kept as a floor for
         // normal frames. The transform is detection-only; crops use raw pixels.
@@ -1691,7 +1691,7 @@ struct ImageProcessor: Sendable {
             let stretchedStd = (sSumSq / n - (sSum / n) * (sSum / n)).squareRoot()
             let rawMean = rawSum / n
             // Gutter: dark AND flat after the per-frame stretch. Keying flatness
-            // on the STRETCHED std (not raw) is essential in dark frames 鈥?the
+            // on the STRETCHED std (not raw) is essential in dark frames — the
             // subject right at the edge is near-black with tiny RAW variance, so a
             // raw-std test would brand it gutter and the edge would never pull in;
             // the stretch lifts its texture above the flat gutter. A real gutter
@@ -1714,7 +1714,7 @@ struct ImageProcessor: Sendable {
             let yRange = (minY + inset)..<(maxY - inset)
             guard !yRange.isEmpty else { return region }
 
-            // Per-frame auto-levels bounds (2鈥?8% of the frame interior), so the
+            // Per-frame auto-levels bounds (2–98% of the frame interior), so the
             // stretch in `classify` adapts to this frame's own exposure.
             var samples: [UInt8] = []
             let sStepX = max(1, boxW / 100), sStepY = max(1, boxH / 100)
@@ -1737,15 +1737,15 @@ struct ImageProcessor: Sendable {
             }
 
             // A real inter-frame gutter is a solid black band several pixels
-            // wide; a 1鈥?px "gutter" dip inside dark content (shaded wood) is
+            // wide; a 1–2px "gutter" dip inside dark content (shaded wood) is
             // not. Require a gutter run of at least this many columns next to a
             // transition, so the snap locks onto the true frame boundary rather
             // than a speck of shadow.
             // Require a real gutter run beside the transition, but tolerate a
             // few anti-aliased columns between the solid black and the content:
             // count gutter columns in a slightly wider span and demand at least
-            // minGutterRun of them. A 1鈥?px shadow speck still can't reach the
-            // count, while a gradual gutter鈫抍ontent edge (a dark subject right
+            // minGutterRun of them. A 1–2px shadow speck still can't reach the
+            // count, while a gradual gutter→content edge (a dark subject right
             // against the black band) is no longer missed and left in the frame.
             let minGutterRun = max(3, Int(medianWidth * 0.006))
             let gutterSpan = minGutterRun + 3
@@ -1762,7 +1762,7 @@ struct ImageProcessor: Sendable {
                 return g >= minGutterRun
             }
 
-            // LEFT edge 鈫?gutter鈫抍ontent transition (content backed by a real
+            // LEFT edge → gutter→content transition (content backed by a real
             // gutter run) nearest minX.
             var left = minX
             var bestL: Int? = nil
@@ -1771,7 +1771,7 @@ struct ImageProcessor: Sendable {
             }
             if let b = bestL { left = b }
 
-            // RIGHT edge 鈫?content鈫抔utter transition nearest maxX-1.
+            // RIGHT edge → content→gutter transition nearest maxX-1.
             var right = maxX - 1
             var bestR: Int? = nil
             for x in max(1, (maxX - 1) - cap)...min(width - 2, (maxX - 1) + cap) where c(x).content && gutterRunRightOf(x) {
@@ -3957,5 +3957,4 @@ private extension Array where Element == Double {
         return reduce(0, +) / Double(count)
     }
 }
-
 

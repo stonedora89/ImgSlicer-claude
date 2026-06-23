@@ -12,19 +12,19 @@ enum CropDetectionStage: Sendable {
     var displayName: String {
         switch self {
         case .projectionSeparators:
-            return "鍒嗛殧绾胯瘑鍒?
+            return "分隔线识别"
         case .filmFrames:
-            return "鑳剁墖杈规"
+            return "胶片边框"
         case .visionRectangles:
             return "鐭╁舰杞粨"
         case .foregroundComponents:
             return "涓讳綋鍖哄煙"
         case .localContrastComponents:
-            return "灞€閮ㄥ姣?
+            return "局部对比"
         case .externalDetector:
-            return "鏅鸿兘璇嗗埆"
+            return "智能识别"
         case .darkGutters:
-            return "鏆楀尯缃戞牸"
+            return "暗区网格"
         }
     }
 }

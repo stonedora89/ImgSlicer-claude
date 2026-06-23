@@ -23,11 +23,11 @@ struct StartProcessingPrompt: Identifiable {
     var canStart: Bool { waitingCount > 0 }
 
     var title: String {
-        canStart ? "鏈?\(waitingCount) 涓换鍔″彲浠ュ紑濮? : "娌℃湁鍙紑濮嬬殑浠诲姟"
+        canStart ? "有 \(waitingCount) 个任务可以开始" : "没有可开始的任务"
     }
 
     var message: String {
-        "绛夊緟澶勭悊锛歕(waitingCount) 涓猏n姝ｅ湪澶勭悊锛歕(runningCount) 涓猏n宸插畬鎴愶細\(doneCount) 涓猏n闇€纭锛歕(needsReviewCount) 涓猏n\n鏈鍙細鍚姩鈥滅瓑寰呬腑鈥濈殑浠诲姟锛涙鍦ㄥ鐞嗐€佸凡瀹屾垚鍜岄渶纭鐨勪换鍔′笉浼氶噸澶嶅鐞嗐€?
+        "等待处理：\(waitingCount) 个\n正在处理：\(runningCount) 个\n已完成：\(doneCount) 个\n需确认：\(needsReviewCount) 个\n\n本次只会启动“等待中”的任务；正在处理、已完成和需确认的任务不会重复处理。"
     }
 }
 
@@ -41,8 +41,8 @@ final class AppStore: ObservableObject {
     @Published var settings = CropSettings()
     @Published var lastImportSummary: ImportSummary?
     @Published var isDropTargeted = false
-    @Published var logMessage = "瀵煎叆鏂囦欢鎴栨枃浠跺す鍚庯紝绯荤粺浼氶€掑綊璇嗗埆鍥剧墖骞跺缓绔嬬嫭绔嬩换鍔°€?
-    @Published var logSubMessage = "鍘熷浘鍙锛岃緭鍑哄啓鍏ユ柊鐨?ImgSlicer_Output 鐩綍銆?
+    @Published var logMessage = "导入文件或文件夹后，系统会递归识别图片并建立独立任务。"
+    @Published var logSubMessage = "原图只读，输出写入新的 ImgSlicer_Output 目录。"
     /// Set when a re-detect would discard a photo's manual corrections; the UI
     /// shows a confirmation and only proceeds if the user accepts.
     @Published var manualRedetectPrompt: ManualRedetectPrompt?
@@ -93,7 +93,7 @@ final class AppStore: ObservableObject {
             photo.cropCandidates.first { $0.id == candidateID }
         } ?? photo.cropCandidates.first
 
-        if let selectedCandidate, let reference = marginReference(regions: selectedCandidate.regions, source: "璇嗗埆妗?) {
+        if let selectedCandidate, let reference = marginReference(regions: selectedCandidate.regions, source: "识别框") {
             return reference
         }
         return marginReference(regions: photo.cropRegions, source: photo.hasLocalOverrides ? "鎵嬪姩妗?" : "褰撳墠妗?")
@@ -106,7 +106,7 @@ final class AppStore: ObservableObject {
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.image, .folder]
         panel.prompt = "瀵煎叆"
-        panel.message = "閫夋嫨鍥剧墖鏂囦欢鎴栧寘鍚浘鐗囩殑鏂囦欢澶?
+        panel.message = "选择图片文件或包含图片的文件夹"
         if panel.runModal() == .OK {
             importItems(panel.urls)
         }
@@ -127,8 +127,8 @@ final class AppStore: ObservableObject {
         }
 
         guard !imported.isEmpty else {
-            logMessage = "娌℃湁鎵惧埌鍙鐞嗗浘鐗囥€?
-            logSubMessage = "鏀寔 jpg銆乯peg銆乸ng銆乭eic銆乭eif銆乼iff銆乥mp銆乬if銆?
+            logMessage = "没有找到可处理图片。"
+            logSubMessage = "支持 jpg、jpeg、png、heic、heif、tiff、bmp、gif。"
             return
         }
 
@@ -137,8 +137,8 @@ final class AppStore: ObservableObject {
         selectedTaskID = selectedTaskID ?? imported.first?.id
         selectedPhotoID = selectedPhotoID ?? imported.first?.photos.first?.id
         lastImportSummary = ImportSummary(folderCount: totalFolders, subfolderCount: totalSubfolders, imageCount: totalImages)
-        logMessage = "宸茶瘑鍒?\(totalFolders) 涓枃浠跺す銆乗(totalSubfolders) 涓瓙鏂囦欢澶广€乗(totalImages) 寮犲浘鐗囥€?
-        logSubMessage = "姝ｅ湪浼樺厛璇嗗埆褰撳墠涓庡悗缁収鐗囥€?
+        logMessage = "已识别 \(totalFolders) 个文件夹、\(totalSubfolders) 个子文件夹、\(totalImages) 张图片。"
+        logSubMessage = "正在优先识别当前与后续照片。"
         scheduleLocator(taskIndexes: Array(startIndex..<tasks.count), priorityTaskIndex: startIndex, priorityPhotoIndex: 0)
     }
 
@@ -162,7 +162,7 @@ final class AppStore: ObservableObject {
         startProcessingPrompt = nil
         guard summary.canStart else { return }
 
-        logMessage = "宸插畨鎺?\(summary.waitingCount) 涓瓑寰呬腑鐨勪换鍔″紑濮嬪鐞嗐€?
+        logMessage = "已安排 \(summary.waitingCount) 个等待中的任务开始处理。"
         logSubMessage = skippedProcessingSummary(summary)
 
         // A live queue will pick up any newly imported waiting tasks after its
@@ -184,10 +184,10 @@ final class AppStore: ObservableObject {
     }
 
     private func skippedProcessingSummary(_ summary: StartProcessingPrompt) -> String {
-        "璺宠繃 \(summary.runningCount) 涓鐞嗕腑銆乗(summary.doneCount) 涓凡瀹屾垚銆乗(summary.needsReviewCount) 涓渶纭浠诲姟銆?
+        "跳过 \(summary.runningCount) 个处理中、\(summary.doneCount) 个已完成、\(summary.needsReviewCount) 个需确认任务。"
     }
 
-    /// Clears every task except those currently being processed 鈥?a running
+    /// Clears every task except those currently being processed — a running
     /// task can't be removed because the queue is actively writing to it.
     func clearFinishedAndIdle() {
         tasks.removeAll { $0.status != .running }
@@ -202,7 +202,7 @@ final class AppStore: ObservableObject {
         guard let task = tasks.first(where: { $0.id == taskID }) else { return }
         let folderURL = task.status == .done ? outputFolderURL(for: task) : task.rootURL
         guard FileManager.default.fileExists(atPath: folderURL.path) else {
-            logMessage = task.status == .done ? "鏈壘鍒拌緭鍑烘枃浠跺す銆? : "鏈壘鍒板師濮嬫枃浠跺す銆?
+            logMessage = task.status == .done ? "未找到输出文件夹。" : "未找到原始文件夹。"
             logSubMessage = folderURL.path
             return
         }
@@ -261,15 +261,15 @@ final class AppStore: ObservableObject {
         }
         tasks[indexes.task].photos[indexes.photo].status = manual ? .manual : tasks[indexes.task].photos[indexes.photo].status
         tasks[indexes.task].status = .needsReview
-        tasks[indexes.task].detail = "宸蹭繚瀛樹汉宸ュ井璋冪粨鏋?
+        tasks[indexes.task].detail = "已保存人工微调结果"
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         let photo = tasks[indexes.task].photos[indexes.photo]
         let rootURL = tasks[indexes.task].rootURL
         editStore.remove(photoRelativePath: photo.relativePath, rootURL: rootURL)
         sampleLibrary.removeProfiles(sourceName: photo.name, rootURL: rootURL)
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
-        logMessage = "宸叉洿鏂拌鍒囨锛屼汉宸ョ粨鏋滀細浼樺厛淇濈暀銆?
-        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) 路 鎵嬪姩寰皟宸蹭綔涓哄弬鑰冩牱鏈?
+        logMessage = "已更新裁切框，人工结果会优先保留。"
+        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 手动微调已作为参考样本"
     }
 
     /// Manually sets a box's tilt (degrees, about its centre). Mirrors
@@ -285,10 +285,10 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].photos[indexes.photo].hasLocalOverrides = true
         tasks[indexes.task].photos[indexes.photo].status = .manual
         tasks[indexes.task].status = .needsReview
-        tasks[indexes.task].detail = "宸蹭繚瀛樹汉宸ユ棆杞粨鏋?
+        tasks[indexes.task].detail = "已保存人工旋转结果"
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
-        logMessage = "宸叉洿鏂拌鍒囨瑙掑害锛屼汉宸ョ粨鏋滀細浼樺厛淇濈暀銆?
+        logMessage = "已更新裁切框角度，人工结果会优先保留。"
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) 路 \(String(format: "%.1f", angle))掳 鎵嬪姩鏃嬭浆"
     }
 
@@ -299,10 +299,10 @@ final class AppStore: ObservableObject {
         guard selectedPhoto != nil else { return }
         isDrawingNewRegion.toggle()
         if isDrawingNewRegion {
-            logMessage = "妗嗛€夋ā寮忥細鍦ㄩ瑙堝浘涓婃嫋鍑轰竴涓柊鐨勮鍒囨銆?
-            logSubMessage = "鎸?Esc 鎴栧啀娆＄偣鍑绘寜閽彇娑堛€?
+            logMessage = "已退出框选模式。"
+            logSubMessage = ""
         } else {
-            logMessage = "宸查€€鍑烘閫夋ā寮忋€?
+            logMessage = "已退出框选模式。"
             logSubMessage = ""
         }
     }
@@ -310,7 +310,7 @@ final class AppStore: ObservableObject {
     func cancelDrawNewRegion() {
         guard isDrawingNewRegion else { return }
         isDrawingNewRegion = false
-        logMessage = "宸插彇娑堟閫夈€?
+        logMessage = "已取消框选。"
         logSubMessage = ""
     }
 
@@ -323,12 +323,12 @@ final class AppStore: ObservableObject {
         let newRegion = CropRegion(index: regions.count + 1, rect: rect.normalizedCropRect, isManual: true)
         tasks[indexes.task].photos[indexes.photo].cropRegions.append(newRegion)
         selectedCropRegionID = newRegion.id
-        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "宸叉閫夋柊澧炶鍒囨")
-        logMessage = "宸叉寜浣犳閫夌殑浣嶇疆鏂板瑁佸垏妗嗐€?
-        logSubMessage = "鍙户缁嫋鍔ㄦ浣撴垨璋冩暣鍥涜銆?
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已框选新增裁切框")
+        logMessage = "已按你框选的位置新增裁切框。"
+        logSubMessage = "可继续拖动框体或调整四角。"
     }
 
-    /// Deletes whichever box is currently selected 鈥?the entry point for the
+    /// Deletes whichever box is currently selected — the entry point for the
     /// keyboard Delete key, mirroring the per-box "x" button.
     @discardableResult
     func deleteSelectedCropRegion() -> Bool {
@@ -340,16 +340,16 @@ final class AppStore: ObservableObject {
     func deleteSelectedCrop(regionID: CropRegion.ID) {
         guard let indexes = selectedIndexes() else { return }
         guard tasks[indexes.task].photos[indexes.photo].cropRegions.count > 1 else {
-            logMessage = "鑷冲皯闇€瑕佷繚鐣欎竴涓鍒囨銆?
-            logSubMessage = "鍙互鎷栧姩褰撳墠妗嗚皟鏁村埌姝ｇ‘浣嶇疆銆?
+            logMessage = "至少需要保留一个裁切框。"
+            logSubMessage = "可以拖动当前框调整到正确位置。"
             return
         }
         tasks[indexes.task].photos[indexes.photo].cropRegions.removeAll { $0.id == regionID }
         reindexRegions(taskIndex: indexes.task, photoIndex: indexes.photo)
         selectedCropRegionID = tasks[indexes.task].photos[indexes.photo].cropRegions.first?.id
-        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "宸插垹闄ゅ浣欒鍒囨")
-        logMessage = "宸插垹闄ゅ浣欒鍒囨銆?
-        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) 路 宸查噸鏂扮紪鍙?
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已删除多余裁切框")
+        logMessage = "已删除多余裁切框。"
+        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 已重新编号"
     }
 
     func applySelectedCandidate(_ candidateID: CropCandidate.ID) {
@@ -360,7 +360,7 @@ final class AppStore: ObservableObject {
 
     /// Global margins are a batch baseline: a slider change re-bakes the margins
     /// for every *auto* photo in the current task from its selected candidate.
-    /// Manual photos are local overrides and stay pinned 鈥?global margins never
+    /// Manual photos are local overrides and stay pinned — global margins never
     /// touch them; they are tuned by dragging their boxes.
     func reapplySelectedCandidateMargins() {
         defer { lastMarginValues = MarginValues(settings: settings) }
@@ -379,12 +379,12 @@ final class AppStore: ObservableObject {
         }
 
         guard applied > 0 else {
-            logMessage = "褰撳墠浠诲姟娌℃湁鍙簲鐢ㄨ竟璺濈殑鑷姩瑁佸垏妗嗐€?
-            logSubMessage = "鎵嬪姩璋冩暣杩囩殑鍥剧墖淇濈暀鏈湴缁撴灉锛屼笉闅忓叏灞€杈硅窛鍙樺寲銆?
+            logMessage = "当前任务没有可应用边距的自动裁切框。"
+            logSubMessage = "手动调整过的图片保留本地结果，不随全局边距变化。"
             return
         }
-        logMessage = "宸叉寜褰撳墠杈硅窛鏇存柊鑷姩瑁佸垏妗嗐€?
-        logSubMessage = "鏈换鍔?\(applied) 寮犺嚜鍔ㄥ浘宸插簲鐢ㄤ笂涓嬪乏鍙宠竟璺濓紱鎵嬪姩鍥炬湭鏀瑰姩銆?
+        logMessage = "已按当前边距更新自动裁切框。"
+        logSubMessage = "本任务 \(applied) 张自动图已应用上下左右边距；手动图未改动。"
     }
 
     func saveSelectedSampleProfile() {
@@ -392,18 +392,18 @@ final class AppStore: ObservableObject {
         let task = tasks[indexes.task]
         let photo = task.photos[indexes.photo]
         guard let profile = sampleLibrary.makeProfile(photo: photo, layout: settings.businessProfile) else {
-            logMessage = "褰撳墠鍥剧墖杩樻病鏈夊彲淇濆瓨鐨勬爣鍑嗘牱鏈€?
-            logSubMessage = "鍏堥€変腑骞惰皟鏁翠竴涓噯纭鍒囨锛屽啀淇濆瓨涓烘牱鏈€?
+            logMessage = "当前图片还没有可保存的标准样本。"
+            logSubMessage = "先选中并调整一个准确裁切框，再保存为样本。"
             return
         }
         sampleLibrary.save(profile: profile, rootURL: task.rootURL)
-        tasks[indexes.task].detail = "宸蹭繚瀛樿瘑鍒牱鏈?
-        logMessage = "宸蹭繚瀛樻牱鏈細\(profile.regionCount) 涓弬鑰冩銆?
-        logSubMessage = "鍚屾枃浠跺す鍚庣画璇嗗埆浼氫紭鍏堝弬鑰冨楂樸€佹瘮渚嬨€侀潰绉拰杈圭紭鐗瑰緛銆?
+        tasks[indexes.task].detail = "已保存识别样本"
+        logMessage = "已保存样本：\(profile.regionCount) 个参考框。"
+        logSubMessage = "同文件夹后续识别会优先参考宽高、比例、面积和边缘特征。"
     }
 
     /// Re-detect the selected photo, but if it carries manual corrections, ask
-    /// first 鈥?re-detection replaces the hand-adjusted boxes with fresh
+    /// first — re-detection replaces the hand-adjusted boxes with fresh
     /// automatic ones, so it must never wipe a correction silently.
     func redetectSelectedPhoto() {
         guardingManualCorrections { [weak self] in self?.performRedetectSelectedPhoto() }
@@ -453,8 +453,8 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].photos[indexes.photo].status = .locating
         tasks[indexes.task].photos[indexes.photo].hasLocalOverrides = false
         selectedCropRegionID = nil
-        tasks[indexes.task].detail = "姝ｅ湪閲嶆柊璇嗗埆褰撳墠鍥剧墖"
-        logMessage = "姝ｅ湪閲嶆柊鐢熸垚鑷姩鏁堟灉銆?
+        tasks[indexes.task].detail = "正在重新识别当前图片"
+        logMessage = "正在重新生成自动效果。"
         logSubMessage = tasks[indexes.task].photos[indexes.photo].name
 
         Task { [weak self, processor, currentSettings, photoURL, taskID, photoID, sampleProfiles] in
@@ -468,8 +468,8 @@ final class AppStore: ObservableObject {
     func smartRedetectSelectedPhoto() {
         guard let indexes = selectedIndexes(),
               selectedManualTemplateRegion(taskIndex: indexes.task, photoIndex: indexes.photo) != nil else {
-            logMessage = "褰撳墠娌℃湁鍙敤鏍锋湰妗?"
-            logSubMessage = "璇峰厛閫夋嫨涓€涓墜鍔ㄨ皟鏁磋繃鐨勬牱鍥炬锛屽啀鎵ц鏍峰浘璇嗗埆銆?"
+            logMessage = "当前图片还没有可保存的标准样本。"
+            logSubMessage = "先选中并调整一个准确裁切框，再保存为样本。"
             return
         }
         let photo = tasks[indexes.task].photos[indexes.photo]
@@ -490,8 +490,8 @@ final class AppStore: ObservableObject {
         let currentSettings = settings
         tasks[indexes.task].photos[indexes.photo].status = .locating
         tasks[indexes.task].detail = "姝ｅ湪鎸夋爣鍑嗘鏍″噯褰撳墠鐢诲竷"
-        logMessage = "姝ｅ湪搴旂敤鏍囧噯妗嗗埌褰撳墠鐢诲竷銆?
-        logSubMessage = "浣跨敤閫変腑妗嗘牎鍑嗚嚜鍔ㄨ瘑鍒埌鐨勬瘡涓竟缂樸€?
+        logMessage = "正在应用标准框到当前画布。"
+        logSubMessage = "使用选中框校准自动识别到的每个边缘。"
 
         Task { [weak self, processor, photoURL, taskID, photoID, template, currentSettings] in
             let detected = await Task.detached {
@@ -553,7 +553,7 @@ final class AppStore: ObservableObject {
 
         for job in jobs {
             if tasks.indices.contains(job.taskIndex) {
-                tasks[job.taskIndex].detail = "姝ｅ湪棰勮瘑鍒綋鍓嶄笌鍚庣画鐓х墖"
+                tasks[job.taskIndex].detail = "正在预识别当前与后续照片"
                 for photo in job.photos {
                     if let photoIndex = tasks[job.taskIndex].photos.firstIndex(where: { $0.id == photo.id }),
                        tasks[job.taskIndex].photos[photoIndex].status == .pending {
@@ -575,12 +575,12 @@ final class AppStore: ObservableObject {
             }
             if tasks.indices.contains(job.taskIndex), tasks[job.taskIndex].status == .waiting {
                 let remaining = tasks[job.taskIndex].photos.filter { $0.status == .pending || $0.status == .locating }.count
-                tasks[job.taskIndex].detail = remaining == 0 ? "宸插畬鎴愬叏閮ㄩ璇嗗埆锛岀瓑寰呭紑濮嬪鐞? : "宸查璇嗗埆锛屽墿浣?\(remaining) 寮犲悗鍙扮户缁?
+                tasks[job.taskIndex].detail = remaining == 0 ? "已完成全部预识别，等待开始处理" : "已预识别，剩余 \(remaining) 张后台继续"
             }
         }
         if !Task.isCancelled {
-            logMessage = "宸查璇嗗埆褰撳墠浣嶇疆闄勮繎鐓х墖銆?
-            logSubMessage = "鍚戝悗瀹℃牳鏃讹紝鍚庣画鐓х墖浼氫紭鍏堝噯澶囧ソ瑁佸垏妗嗐€?
+            logMessage = "已预识别当前位置附近照片。"
+            logSubMessage = "向后审核时，后续照片会优先准备好裁切框。"
         }
     }
 
@@ -639,7 +639,7 @@ final class AppStore: ObservableObject {
 
     private func runQueue() async {
         for index in tasks.indices where tasks[index].status == .waiting {
-            tasks[index].detail = "绛夊緟绌洪棽澶勭悊妲戒綅"
+            tasks[index].detail = "等待空闲处理槽位"
         }
 
         while !Task.isCancelled {
@@ -652,7 +652,7 @@ final class AppStore: ObservableObject {
             let jobs: [(Int, FolderTask, [SampleProfile])] = batch.map { index in
                 let task = tasks[index]
                 tasks[index].status = .running
-                tasks[index].detail = "鍚庡彴鑷姩璇嗗埆涓庤緭鍑?
+                tasks[index].detail = "后台自动识别与输出"
                 return (index, task, sampleLibrary.load(rootURL: task.rootURL))
             }
 
@@ -679,7 +679,7 @@ final class AppStore: ObservableObject {
                     }
                     if let index = tasks.firstIndex(where: { $0.id == taskID }) {
                         tasks[index].status = tasks[index].photos.contains(where: { $0.status == .failed }) ? .needsReview : .done
-                        tasks[index].detail = tasks[index].status == .done ? "宸茶緭鍑哄畬鎴? : "閮ㄥ垎鍥剧墖闇€浜哄伐纭"
+                        tasks[index].detail = tasks[index].status == .done ? "已输出完成" : "部分图片需人工确认"
                     }
                 }
             }
@@ -699,9 +699,9 @@ final class AppStore: ObservableObject {
         tasks[taskIndex].photos[photoIndex].status = failed ? .failed : .autoDone
         tasks[taskIndex].photos[photoIndex].outputURLs = outputs
         tasks[taskIndex].processedCount += 1
-        tasks[taskIndex].detail = failed ? "璇嗗埆鍥伴毦锛岀瓑寰呬汉宸ョ‘璁? : "宸插鐞?\(tasks[taskIndex].processedCount) / \(tasks[taskIndex].imageCount)"
+        tasks[taskIndex].detail = failed ? "识别困难，等待人工确认" : "已处理 \(tasks[taskIndex].processedCount) / \(tasks[taskIndex].imageCount)"
         if selectedTaskID == tasks[taskIndex].id || selectedTaskID == nil {
-            logMessage = failed ? "鑷姩璇嗗埆缁撴灉闇€瑕佺‘璁ゃ€? : "宸叉寜 \(regions.count) 涓鍒囧尯鍩熻緭鍑恒€?
+            logMessage = failed ? "自动识别结果需要确认。" : "已按 \(regions.count) 个裁切区域输出。"
             logSubMessage = tasks[taskIndex].photos[photoIndex].name
         }
     }
@@ -720,11 +720,11 @@ final class AppStore: ObservableObject {
             tasks[taskIndex].photos[photoIndex].selectedCandidateID = candidates.first?.id
         }
         tasks[taskIndex].photos[photoIndex].status = .located
-        tasks[taskIndex].detail = "宸插畾浣?\(regions.count) 涓鍒囧尯鍩?
+        tasks[taskIndex].detail = "已重新生成 \(candidates.count) 个自动效果"
         if selectedTaskID == tasks[taskIndex].id,
            selectedPhotoID == tasks[taskIndex].photos[photoIndex].id || selectedPhotoID == nil {
-            logMessage = "宸茶瘑鍒嚭 \(regions.count) 涓彲鍒囧垎鐓х墖鍖哄煙銆?
-            logSubMessage = "姣忎釜缂栧彿妗嗛兘鍙互鍗曠嫭鎷栧姩鍜岃皟鏁村洓瑙掋€?
+            logMessage = "已识别出 \(regions.count) 个可切分照片区域。"
+            logSubMessage = "每个编号框都可以单独拖动和调整四角。"
         }
     }
 
@@ -735,7 +735,7 @@ final class AppStore: ObservableObject {
         tasks[taskIndex].photos[photoIndex].cropCandidates = candidates
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = candidate.id
         applyCandidate(candidate, taskIndex: taskIndex, photoIndex: photoIndex)
-        tasks[taskIndex].detail = "宸查噸鏂扮敓鎴?\(candidates.count) 涓嚜鍔ㄦ晥鏋?
+        tasks[taskIndex].detail = "已应用自动效果：\(candidate.title)"
     }
 
     private func applyCandidate(_ candidate: CropCandidate, taskIndex: Int, photoIndex: Int) {
@@ -750,8 +750,8 @@ final class AppStore: ObservableObject {
         }
         tasks[taskIndex].detail = "宸插簲鐢ㄨ嚜鍔ㄦ晥鏋滐細\(candidate.title)"
         editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
-        logMessage = "宸插簲鐢?\(candidate.title)銆?
-        logSubMessage = "\(candidate.detail) 路 鍙户缁井璋冿紝鍒囨崲鍥剧墖浼氳嚜鍔ㄤ繚瀛?
+        logMessage = "已应用 \(candidate.title)。"
+        logSubMessage = "\(candidate.detail) · 可继续微调，切换图片会自动保存"
     }
 
     private func selectedTemplateRegion(taskIndex: Int, photoIndex: Int) -> CropRegion? {
@@ -789,11 +789,11 @@ final class AppStore: ObservableObject {
         tasks[taskIndex].photos[photoIndex].status = .manual
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = nil
         tasks[taskIndex].status = .needsReview
-        tasks[taskIndex].detail = "宸叉寜鏍囧噯妗嗘牎鍑嗗綋鍓嶇敾甯?
+        tasks[taskIndex].detail = "已按标准框校准当前画布"
         editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
         saveSampleProfileIfPossible(taskIndex: taskIndex, photoIndex: photoIndex)
-        logMessage = "宸插簲鐢ㄦ爣鍑嗘鍒板綋鍓嶇敾甯冦€?
-        logSubMessage = "鍏辩敓鎴?\(regions.count) 涓锛屽彲缁х画寰皟锛屽垏鎹㈠浘鐗囦細鑷姩淇濆瓨銆?
+        logMessage = "已应用标准框到当前画布。"
+        logSubMessage = "共生成 \(regions.count) 个框，可继续微调，切换图片会自动保存。"
     }
 
     private func relativeTemplateRegions(from detectedRegions: [CropRegion], template: CGRect) -> [CropRegion] {
@@ -1018,6 +1018,5 @@ private extension CGRect {
         return CGRect(x: x, y: y, width: width, height: height)
     }
 }
-
 
 
