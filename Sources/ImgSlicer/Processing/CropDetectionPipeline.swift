@@ -16,9 +16,9 @@ enum CropDetectionStage: Sendable {
         case .filmFrames:
             return "胶片边框"
         case .visionRectangles:
-            return "鐭╁舰杞粨"
+            return "矩形轮廓"
         case .foregroundComponents:
-            return "涓讳綋鍖哄煙"
+            return "主体区域"
         case .localContrastComponents:
             return "局部对比"
         case .externalDetector:
@@ -101,4 +101,3 @@ struct ProcessingPolicy: Sendable {
         }
     }
 }
-

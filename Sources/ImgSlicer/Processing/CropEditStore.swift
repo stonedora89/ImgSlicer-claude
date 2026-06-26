@@ -11,7 +11,7 @@ struct CropEditStore: Sendable {
         var restored = task
         for photoIndex in restored.photos.indices {
             let relativePath = restored.photos[photoIndex].relativePath
-            guard let edit = edits.photos[relativePath], !edit.regions.isEmpty else { continue }
+            guard let edit = edits.photos[relativePath] else { continue }
             let isManual = edit.hasLocalOverrides ?? false
             // Restoring a photo-level local override must not mark every box as manual.
             // Box-level `isManual` is reserved for an actually hand-picked template/manual box.

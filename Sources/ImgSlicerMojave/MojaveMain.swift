@@ -35,7 +35,7 @@ final class MojaveWindowController: NSWindowController, NSTableViewDataSource, N
     private let tableView = NSTableView()
     private let preview = MojavePreviewView()
     private let statusLabel = NSTextField(labelWithString: "导入图片或文件夹开始")
-    private let importButton = NSButton(title: "瀵煎叆", target: nil, action: nil)
+private let importButton = NSButton(title: "导入", target: nil, action: nil)
     private let locateButton = NSButton(title: "重新识别", target: nil, action: nil)
     private let exportButton = NSButton(title: "识别并导出", target: nil, action: nil)
 
@@ -274,4 +274,3 @@ final class MojavePreviewView: NSView {
         }
     }
 }
-

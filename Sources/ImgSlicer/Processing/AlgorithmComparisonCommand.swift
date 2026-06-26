@@ -36,7 +36,9 @@ struct DetectionOverlayCommand: Sendable {
         }
 
         let processor = ImageProcessor()
-        let candidates = processor.detectCropCandidates(for: imageURL, settings: settings)
+        let sampleRoot = Self.sampleRoot(for: imageURL) ?? imageURL.deletingLastPathComponent()
+        let sampleProfiles = SampleLibrary().load(rootURL: sampleRoot)
+        let candidates = processor.detectCropCandidates(for: imageURL, settings: settings, sampleProfiles: sampleProfiles)
         let regions = candidates.first?.adjustedRegions(settings: settings) ?? []
         let scale = min(1, 1800 / Double(max(cgImage.width, cgImage.height)))
         let outputSize = NSSize(width: Double(cgImage.width) * scale, height: Double(cgImage.height) * scale)
@@ -85,6 +87,17 @@ struct DetectionOverlayCommand: Sendable {
         } catch {
             print("Unable to write overlay: \(error.localizedDescription)")
         }
+    }
+
+    private static func sampleRoot(for imageURL: URL) -> URL? {
+        var url = imageURL.deletingLastPathComponent().standardizedFileURL
+        while url.path != "/" {
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent(".imgslicer-samples.json").path) {
+                return url
+            }
+            url.deleteLastPathComponent()
+        }
+        return nil
     }
 }
 

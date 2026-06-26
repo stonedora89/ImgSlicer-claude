@@ -18,6 +18,7 @@ README_PATH="$RELEASE_DIR/其他Mac打开说明.txt"
 INSTALLER_PATH="$RELEASE_DIR/安装.command"
 
 cd "$ROOT_DIR"
+ruby "$ROOT_DIR/scripts/check-source-encoding.rb"
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/ModuleCache"
 swift build -c debug --cache-path "$ROOT_DIR/.build/cache"
 BIN_DIR="$(swift build -c debug --show-bin-path --cache-path "$ROOT_DIR/.build/cache")"

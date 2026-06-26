@@ -8,15 +8,8 @@ struct AppShell: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar()
-            HStack(spacing: 16) {
-                QueuePanel()
-                    .frame(width: 292)
-                PreviewWorkspace()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                ParameterPanel()
-                    .frame(width: 336)
-            }
-            .padding(16)
+            WorkspaceColumns()
+            .padding(8)
             .frame(maxHeight: .infinity)
             Filmstrip()
                 .frame(height: 132)
@@ -49,7 +42,7 @@ struct AppShell: View {
             Button("重新识别（丢弃手动修正）", role: .destructive) {
                 store.confirmManualRedetect()
             }
-            Button("淇濈暀鎵嬪姩淇", role: .cancel) {
+            Button("保留手动修正", role: .cancel) {
                 store.manualRedetectPrompt = nil
             }
         } message: { prompt in
@@ -67,7 +60,7 @@ struct AppShell: View {
                 Button("开始处理 \(prompt.waitingCount) 个任务") {
                     store.confirmStartProcessing()
                 }
-                Button("鍙栨秷", role: .cancel) {
+                Button("取消", role: .cancel) {
                     store.startProcessingPrompt = nil
                 }
             } else {
@@ -96,6 +89,9 @@ struct AppShell: View {
             Button("Cancel marquee") { store.cancelDrawNewRegion() }
                 .keyboardShortcut(.cancelAction)
                 .disabled(!store.isDrawingNewRegion)
+            Button("Copy original") { store.copySelectedOriginalToPasteboard() }
+                .keyboardShortcut("c", modifiers: [.command])
+                .disabled(store.selectedPhoto == nil)
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -130,6 +126,26 @@ struct AppShell: View {
     }
 }
 
+/// Keeps the canvas dominant (target 1.5:7:1.5) while retaining enough width for
+/// task names, parameter fields, and the three local action buttons.
+struct WorkspaceColumns: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let proportionalWidth = proxy.size.width * 0.15
+            let sidebarWidth = max(proportionalWidth, 220)
+
+            HStack(spacing: 10) {
+                QueuePanel()
+                    .frame(width: sidebarWidth)
+                PreviewWorkspace()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ParameterPanel()
+                    .frame(width: sidebarWidth)
+            }
+        }
+    }
+}
+
 final class URLCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [URL] = []
@@ -153,10 +169,10 @@ struct TopBar: View {
             BrandLockup()
             Spacer()
         }
-        .padding(.leading, 68)
+        .padding(.leading, 24)
         .padding(.trailing, 18)
-        .padding(.top, 17)
-        .frame(height: 72, alignment: .topLeading)
+        .padding(.top, 12)
+        .frame(height: 54, alignment: .topLeading)
         .background(Color(red: 0.095, green: 0.105, blue: 0.125).opacity(0.96))
         .overlay(alignment: .bottom) {
             Rectangle().fill(AppTheme.line).frame(height: 1)
@@ -166,23 +182,15 @@ struct TopBar: View {
 
 struct BrandLockup: View {
     var body: some View {
-        HStack(alignment: .center, spacing: 11) {
+        HStack(alignment: .center, spacing: 8) {
             LogoMark()
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("ImgSlicer")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(AppTheme.text)
-                    .lineLimit(1)
-                Text("批量底片切分与边界微调")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(AppTheme.muted)
-                    .lineLimit(1)
-            }
-            .padding(.top, 1)
+                .frame(width: 26, height: 26)
+            Text("ImgSlicer")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(AppTheme.text)
+                .lineLimit(1)
         }
-        .frame(width: 252, height: 38, alignment: .leading)
+        .frame(height: 30, alignment: .leading)
     }
 }
 
@@ -211,8 +219,8 @@ struct QueuePanel: View {
                 .buttonStyle(IconButtonStyle())
                 .help("清理所有任务（处理中的除外）")
             }
-            .padding(.horizontal, 16)
-            .frame(height: 50)
+            .padding(.horizontal, 12)
+            .frame(height: 42)
             .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
 
             ScrollView {
@@ -574,6 +582,8 @@ struct CropOverlay: View {
     let onSelect: () -> Void
     let onChange: (CGRect) -> Void
     @State private var workingRect: CGRect?
+    @State private var dragStartRect: CGRect?
+    @State private var isDragging = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -600,9 +610,18 @@ struct CropOverlay: View {
                 // instead of leaving them square while only the stroke turns.
                 ZStack(alignment: .topLeading) {
                     Rectangle()
-                        .stroke(activeColor.opacity(isSelected ? 0.95 : 0.78), lineWidth: isSelected ? 3 : 2)
+                        .stroke(Color.black.opacity(0.72), lineWidth: isSelected ? 2.2 : 1.8)
+                        .frame(width: draw.width, height: draw.height)
+
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.82), lineWidth: isSelected ? 1.4 : 1.0)
+                        .frame(width: draw.width, height: draw.height)
+
+                    Rectangle()
+                        .stroke(activeColor, lineWidth: isSelected ? 1.1 : 0.9)
                         .background(Rectangle().fill(Color.black.opacity(0.001)))
                         .frame(width: draw.width, height: draw.height)
+                        .shadow(color: activeColor.opacity(isSelected ? 0.78 : 0.55), radius: isSelected ? 3 : 2)
                         .gesture(dragGesture(in: proxy.size, corner: nil))
                         .onTapGesture { onSelect() }
 
@@ -628,10 +647,24 @@ struct CropOverlay: View {
                     ForEach(CropCorner.allCases) { corner in
                         Circle()
                             .fill(Color(red: 0.86, green: 0.91, blue: 0.96))
-                            .overlay(Circle().stroke(activeColor, lineWidth: isSelected ? 3 : 2))
-                            .frame(width: isSelected ? 16 : 14, height: isSelected ? 16 : 14)
+                            .overlay(Circle().stroke(activeColor, lineWidth: 0.8))
+                            .frame(width: isSelected ? 9 : 7, height: isSelected ? 9 : 7)
                             .position(corner.point(in: CGRect(origin: .zero, size: draw.size)))
                             .gesture(dragGesture(in: proxy.size, corner: corner))
+                    }
+
+                    if isSelected {
+                        ForEach(CropEdge.allCases) { edge in
+                            Color.clear
+                                .frame(
+                                    width: edge.isHorizontal ? max(12, draw.width - 20) : 16,
+                                    height: edge.isHorizontal ? 16 : max(12, draw.height - 20)
+                                )
+                                .contentShape(Rectangle())
+                                .position(edge.point(in: CGRect(origin: .zero, size: draw.size)))
+                                .gesture(dragGesture(in: proxy.size, edge: edge))
+                                .help("拖动调整裁切框边缘")
+                        }
                     }
                 }
                 .frame(width: draw.width, height: draw.height, alignment: .topLeading)
@@ -639,7 +672,11 @@ struct CropOverlay: View {
                 .position(x: draw.midX, y: draw.midY)
             }
             .onChange(of: region.rect) { _, newValue in
+                guard !isDragging else { return }
                 workingRect = newValue
+            }
+            .transaction { transaction in
+                transaction.animation = nil
             }
         }
     }
@@ -647,32 +684,70 @@ struct CropOverlay: View {
     private var activeColor: Color {
         // Selected frame always gets the reserved highlight; others cycle the
         // palette by frame number so adjacent boxes are visibly distinct.
-        guard !isSelected else { return AppTheme.orange }
-        let palette = AppTheme.frameColors
+        guard !isSelected else { return AppTheme.cropSelected }
+        let palette = AppTheme.cropFrameColors
         return palette[max(0, region.index - 1) % palette.count]
     }
 
-    private func dragGesture(in size: CGSize, corner: CropCorner?) -> some Gesture {
+    private func dragGesture(in size: CGSize, corner: CropCorner? = nil, edge: CropEdge? = nil) -> some Gesture {
         DragGesture()
             .onChanged { value in
-                onSelect()
-                if workingRect == nil { workingRect = region.rect }
+                if !isDragging {
+                    isDragging = true
+                    let startRect = workingRect ?? region.rect
+                    dragStartRect = startRect
+                    workingRect = startRect
+                    onSelect()
+                }
                 let dx = value.translation.width / max(1, size.width)
                 let dy = value.translation.height / max(1, size.height)
-                var next = region.rect
+                let startRect = dragStartRect ?? region.rect
+                let next: CGRect
                 if let corner {
-                    next = corner.resize(rect: region.rect, dx: dx, dy: dy)
+                    next = constrainedResize(rect: startRect, corner: corner, dx: dx, dy: dy)
+                } else if let edge {
+                    next = constrainedResize(rect: startRect, edge: edge, dx: dx, dy: dy)
                 } else {
-                    next.origin.x += dx
-                    next.origin.y += dy
+                    var moved = startRect
+                    moved.origin.x += dx
+                    moved.origin.y += dy
+                    next = moved
                 }
-                workingRect = next.normalized
+                workingRect = next
             }
             .onEnded { _ in
                 if let workingRect {
                     onChange(workingRect.normalized)
                 }
+                dragStartRect = nil
+                isDragging = false
             }
+    }
+
+    private func constrainedResize(rect: CGRect, corner: CropCorner, dx: Double, dy: Double) -> CGRect {
+        switch corner {
+        case .topLeft:
+            return rect.resized(left: Double(rect.minX) + dx, top: Double(rect.minY) + dy)
+        case .topRight:
+            return rect.resized(right: Double(rect.maxX) + dx, top: Double(rect.minY) + dy)
+        case .bottomLeft:
+            return rect.resized(left: Double(rect.minX) + dx, bottom: Double(rect.maxY) + dy)
+        case .bottomRight:
+            return rect.resized(right: Double(rect.maxX) + dx, bottom: Double(rect.maxY) + dy)
+        }
+    }
+
+    private func constrainedResize(rect: CGRect, edge: CropEdge, dx: Double, dy: Double) -> CGRect {
+        switch edge {
+        case .top:
+            return rect.resized(top: Double(rect.minY) + dy)
+        case .bottom:
+            return rect.resized(bottom: Double(rect.maxY) + dy)
+        case .left:
+            return rect.resized(left: Double(rect.minX) + dx)
+        case .right:
+            return rect.resized(right: Double(rect.maxX) + dx)
+        }
     }
 }
 
@@ -705,6 +780,42 @@ enum CropCorner: CaseIterable, Identifiable {
     }
 }
 
+enum CropEdge: CaseIterable, Identifiable {
+    case top, bottom, left, right
+
+    var id: String { String(describing: self) }
+
+    var isHorizontal: Bool {
+        self == .top || self == .bottom
+    }
+
+    func point(in rect: CGRect) -> CGPoint {
+        switch self {
+        case .top: CGPoint(x: rect.midX, y: rect.minY)
+        case .bottom: CGPoint(x: rect.midX, y: rect.maxY)
+        case .left: CGPoint(x: rect.minX, y: rect.midY)
+        case .right: CGPoint(x: rect.maxX, y: rect.midY)
+        }
+    }
+
+    func resize(rect: CGRect, dx: Double, dy: Double) -> CGRect {
+        var next = rect
+        switch self {
+        case .top:
+            next.origin.y += dy
+            next.size.height -= dy
+        case .bottom:
+            next.size.height += dy
+        case .left:
+            next.origin.x += dx
+            next.size.width -= dx
+        case .right:
+            next.size.width += dx
+        }
+        return next
+    }
+}
+
 struct ViewerLog: View {
     @EnvironmentObject private var store: AppStore
 
@@ -713,7 +824,7 @@ struct ViewerLog: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Circle().fill(AppTheme.green).frame(width: 6, height: 6)
-                    Text("褰撳墠鎿嶄綔鍙嶉")
+                    Text("当前操作反馈")
                         .font(.system(size: 11))
                         .foregroundStyle(Color(red: 0.79, green: 0.83, blue: 0.88))
                 }
@@ -731,7 +842,7 @@ struct ViewerLog: View {
             Spacer()
             if let summary = store.lastImportSummary {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("瀵煎叆缁熻")
+                    Text("导入统计")
                         .font(.system(size: 11, weight: .semibold))
                     Text("\(summary.folderCount) 个文件夹 · \(summary.subfolderCount) 个子文件夹\n\(summary.imageCount) 张图片")
                         .font(.system(size: 11))
@@ -748,7 +859,6 @@ struct ViewerLog: View {
 
 struct ParameterPanel: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showMargins = false
 
     var body: some View {
         content
@@ -765,68 +875,43 @@ struct ParameterPanel: View {
 
     private var content: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("参数设置")
-                    .font(.system(size: 15, weight: .bold))
-                HStack(spacing: 7) {
-                    Button {
-                        store.toggleDrawNewRegion()
-                    } label: {
-                        Image(systemName: store.isDrawingNewRegion ? "viewfinder" : "plus.viewfinder")
-                    }
-                    .buttonStyle(AccentIconButtonStyle(color: store.isDrawingNewRegion ? AppTheme.green : AppTheme.orange))
-                    .disabled(store.selectedPhoto == nil)
-                    .help("框选新增：点亮后在预览图上拖出一个新的裁切框（Esc 取消）")
-
-                    Button {
-                        store.redetectSelectedPhoto()
-                    } label: {
-                        Label("重新识别", systemImage: "wand.and.stars")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .buttonStyle(TemplateRetileButtonStyle(primary: true))
-                    .disabled(store.selectedPhoto == nil)
-                    .help("重新识别：清空当前图片的本地缓存与局部结果，按当前全局参数重新识别当前画布")
-
-                    Button {
-                        store.smartRedetectSelectedPhoto()
-                    } label: {
-                        Label("样图识别", systemImage: "square.on.square.badge.person.crop")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .buttonStyle(TemplateRetileButtonStyle(primary: false))
-                    .disabled(store.selectedPhoto == nil)
-                    .help("样图识别：按当前选中的手动样图框识别当前画布；若当前没有可用样图框，会回退到重新识别")
-                }
-            }
-            .padding(16)
+            Text("参数")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AppTheme.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
             .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
 
             ScrollView {
-                VStack(spacing: 12) {
-                    SettingsGroup("鑷姩鏁堟灉") {
-                        VStack(spacing: 10) {
-                            AutoCandidatePicker()
+                VStack(spacing: 0) {
+                    ParameterScopeSection(
+                        icon: "slider.horizontal.3",
+                        title: "全局内收",
+                        color: AppTheme.blue
+                    ) {
+                        VStack(spacing: 6) {
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                                MarginField(title: "上边距", value: $store.settings.top)
+                                MarginField(title: "下边距", value: $store.settings.bottom)
+                                MarginField(title: "左边距", value: $store.settings.left)
+                                MarginField(title: "右边距", value: $store.settings.right)
+                            }
                         }
                     }
-                    SettingsGroup("鏃嬭浆鏍℃") {
-                        CropAngleControl()
-                    }
-                    CollapsibleGroup("高级 · 边距微调", isExpanded: $showMargins) {
-                        VStack(spacing: 10) {
-                            if let reference = store.recognitionMarginReference {
-                                RecognitionMarginReferenceView(reference: reference)
-                            }
-                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                MarginField(title: "右边距", value: $store.settings.right)
-                                MarginField(title: "右边距", value: $store.settings.right)
-                                MarginField(title: "右边距", value: $store.settings.right)
-                                MarginField(title: "右边距", value: $store.settings.right)
-                            }
+                    ParameterScopeSection(
+                        icon: "rectangle.and.pencil.and.ellipsis",
+                        title: "当前画布",
+                        color: AppTheme.orange
+                    ) {
+                        VStack(spacing: 8) {
+                            localActions
+                            AutoCandidatePicker()
+                            CropTranslationControl()
+                            CropAngleControl()
                         }
                     }
                 }
-                .padding(14)
             }
 
             Button {
@@ -837,22 +922,120 @@ struct ParameterPanel: View {
             .buttonStyle(StartProcessButtonStyle())
             .help("按当前裁切框开始批量输出")
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(16)
+            .padding(12)
             .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
+        }
+    }
+
+    private var localActions: some View {
+        HStack(spacing: 5) {
+            Button {
+                store.toggleDrawNewRegion()
+            } label: {
+                Image(systemName: store.isDrawingNewRegion ? "viewfinder" : "plus.viewfinder")
+            }
+            .buttonStyle(TemplateRetileButtonStyle(primary: store.isDrawingNewRegion))
+            .disabled(store.selectedPhoto == nil)
+            .help("新增裁切框")
+
+            Button {
+                store.redetectSelectedPhoto()
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .buttonStyle(TemplateRetileButtonStyle(primary: true))
+            .disabled(!store.canRestoreSelectedPhotoAutomatic)
+            .help("恢复自动识别结果")
+
+            Button {
+                store.smartRedetectSelectedPhoto()
+            } label: {
+                Image(systemName: "square.on.square.badge.person.crop")
+            }
+            .buttonStyle(TemplateRetileButtonStyle())
+            .disabled(!store.canCalibrateSelectedPhotoFromManualFrame)
+            .help("按当前手动框校准整个画布")
         }
     }
 }
 
+struct ParameterScopeSection<Content: View>: View {
+    let icon: String
+    let title: String
+    let color: Color
+    let content: Content
+
+    init(icon: String, title: String, color: Color, @ViewBuilder content: () -> Content) {
+        self.icon = icon
+        self.title = title
+        self.color = color
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(color)
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            content
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
+    }
+}
+
+struct CropTranslationControl: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Text("整体移动")
+                .font(.system(size: 11))
+                .foregroundStyle(AppTheme.muted)
+            Spacer()
+            VStack(spacing: 3) {
+                moveButton("arrow.up", x: 0, y: -1)
+                HStack(spacing: 3) {
+                    moveButton("arrow.left", x: -1, y: 0)
+                    moveButton("arrow.down", x: 0, y: 1)
+                    moveButton("arrow.right", x: 1, y: 0)
+                }
+            }
+        }
+    }
+
+    private func moveButton(_ icon: String, x: Double, y: Double) -> some View {
+        Button {
+            store.moveAllCropRegions(dxPixels: x, dyPixels: y)
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 22, height: 20)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(AppTheme.text)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .disabled(store.selectedPhoto == nil)
+    }
+}
+
 /// Panel control for the selected box's tilt. On first selecting a box it
-/// shows the system-detected angle; the 宸︽棆杞?/ 鍙虫棆杞?buttons nudge it 1掳 per
-/// click, clamped to 卤15掳. Every change is persisted as that single photo's
+/// shows the system-detected angle; the 左旋转 / 右旋转 buttons nudge it 1° per
+/// click, clamped to ±15°. Every change is persisted as that single photo's
 /// parameter, so switching photos keeps the manual angle.
 struct CropAngleControl: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
         let region = store.selectedCropRegion
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("当前框角度")
                     .font(.system(size: 11))
@@ -862,72 +1045,49 @@ struct CropAngleControl: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.text)
             }
-            HStack(spacing: 8) {
-                rotateButton(title: "右旋转", systemName: "arrow.clockwise", delta: 1, region: region)
-                rotateButton(title: "右旋转", systemName: "arrow.clockwise", delta: 1, region: region)
+            HStack(spacing: 5) {
+                rotateButton(systemName: "arrow.counterclockwise", delta: -1, region: region)
+                rotateButton(systemName: "arrow.clockwise", delta: 1, region: region)
             }
-            Text(caption(for: region))
-                .font(.system(size: 10))
-                .foregroundStyle(AppTheme.muted)
         }
-        .padding(10)
-        .background(Color.black.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.vertical, 2)
     }
 
-    private func rotateButton(title: String, systemName: String, delta: Double, region: CropRegion?) -> some View {
+    private func rotateButton(systemName: String, delta: Double, region: CropRegion?) -> some View {
         Button {
             guard let region else { return }
             let next = (region.angle + delta).clamped(to: -15...15)
             store.updateSelectedCropAngle(regionID: region.id, angle: next)
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: systemName)
-                Text(title)
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.white)
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(region == nil ? AppTheme.muted : AppTheme.text)
             .frame(maxWidth: .infinity)
-            .frame(height: 30)
-            .background(region == nil ? AppTheme.blue.opacity(0.35) : AppTheme.blue)
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .frame(height: 26)
+            .background(region == nil ? Color.white.opacity(0.025) : Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
         .disabled(region == nil)
     }
 
-    private func caption(for region: CropRegion?) -> String {
-        guard let region else { return "请选择一个裁切框" }
-        if region.isManual {
-            return "手动设置 · 切换后自动保存为单张参数"
-        }
-        return "系统识别角度，可微调（±15°，每次 1°）"
-    }
 }
 
 struct AutoCandidatePicker: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("候选效果")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(AppTheme.muted)
-                Spacer()
-            }
-
+        VStack(alignment: .leading, spacing: 4) {
             if let photo = store.selectedPhoto {
                 if !photo.cropCandidates.isEmpty {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 4) {
                         ForEach(photo.cropCandidates) { candidate in
                             Button {
                                 store.applySelectedCandidate(candidate.id)
                             } label: {
                                 CandidateRow(
                                     icon: photo.selectedCandidateID == candidate.id ? "checkmark.circle.fill" : "circle",
-                                    title: candidate.title,
-                                    detail: "\(candidate.detail) · 可信度 \(Int(candidate.score * 100))%"
+                                    title: candidate.title
                                 )
                             }
                             .buttonStyle(CandidateButtonStyle(active: photo.selectedCandidateID == candidate.id))
@@ -936,27 +1096,18 @@ struct AutoCandidatePicker: View {
                 } else if !photo.cropRegions.isEmpty {
                     CandidateRow(
                         icon: "checkmark.circle.fill",
-                        title: "当前裁切框",
-                        detail: "已保留当前结果，可重新生成自动效果"
+                        title: "当前裁切框"
                     )
                     .padding(.horizontal, 10)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 44)
+                    .frame(height: 30)
                     .background(AppTheme.blue.opacity(0.18))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: 5)
                             .stroke(AppTheme.blue.opacity(0.42))
                     }
                 }
-            } else {
-                Text("选择图片后生成自动效果")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AppTheme.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(Color.black.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
     }
@@ -1008,19 +1159,13 @@ struct CollapsibleGroup<Content: View>: View {
 struct CandidateRow: View {
     let icon: String
     let title: String
-    let detail: String
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(detail)
-                    .font(.system(size: 10))
-                    .foregroundStyle(AppTheme.muted)
-            }
+                .font(.system(size: 11, weight: .semibold))
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
             Spacer()
         }
     }
@@ -1056,7 +1201,11 @@ struct Filmstrip: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 10) {
                             ForEach(store.selectedTask?.photos ?? []) { photo in
-                                FilmFrame(photo: photo, active: photo.id == store.selectedPhoto?.id)
+                                FilmFrame(
+                                    photo: photo,
+                                    active: photo.id == store.selectedPhoto?.id,
+                                    onCopy: { store.copyOriginalToPasteboard(photo) }
+                                )
                                     .id(photo.id)
                                     .contentShape(Rectangle())
                                     .onTapGesture { store.selectPhoto(photo.id) }
@@ -1105,6 +1254,7 @@ struct Filmstrip: View {
 struct FilmFrame: View {
     let photo: PhotoItem
     let active: Bool
+    let onCopy: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1121,6 +1271,14 @@ struct FilmFrame: View {
                     )
                 }
                 Circle().fill(statusColor).frame(width: 8, height: 8).padding(5)
+                Button {
+                    onCopy()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(FilmFrameCopyButtonStyle())
+                .padding(4)
+                .help("复制这张原图")
             }
             .frame(width: 112, height: 44)
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -1141,6 +1299,13 @@ struct FilmFrame: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(active ? AppTheme.orange : Color.white.opacity(0.05), lineWidth: active ? 2.5 : 1)
         )
+        .contextMenu {
+            Button {
+                onCopy()
+            } label: {
+                Label("复制原图", systemImage: "doc.on.doc")
+            }
+        }
         .shadow(color: active ? AppTheme.orange.opacity(0.5) : .clear, radius: 7)
         .animation(.easeOut(duration: 0.15), value: active)
     }
@@ -1246,11 +1411,11 @@ struct RecognitionMarginReferenceView: View {
                 Image(systemName: "ruler")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(AppTheme.blue)
-                Text("\(reference.source)鍩哄噯")
+                Text("\(reference.source)基准")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(AppTheme.text)
                 Spacer()
-                Text("鐢ㄤ簬瀵圭収寰皟")
+                Text("用于对照微调")
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.muted)
             }
@@ -1295,19 +1460,35 @@ struct MarginField: View {
     @Binding var value: Double
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 11))
+                .font(.system(size: 10))
                 .foregroundStyle(AppTheme.muted)
-            Stepper(value: $value, in: 0...80, step: 1) {
-                Text("\(Int(value)) px")
-                    .font(.system(size: 12))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 4) {
+                TextField("0", value: clampedValue, format: .number.precision(.fractionLength(0)))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: .infinity)
+                Text("px")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.muted)
+                Stepper("", value: clampedValue, in: 0...80, step: 1)
+                    .labelsHidden()
+                    .controlSize(.small)
             }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .background(Color.white.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .padding(10)
-        .background(Color.black.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var clampedValue: Binding<Double> {
+        Binding(
+            get: { value },
+            set: { value = $0.clamped(to: 0...80) }
+        )
     }
 }
 
@@ -1362,6 +1543,15 @@ enum AppTheme {
     static let blue = Color(red: 0.37, green: 0.53, blue: 0.72)
     static let green = Color(red: 0.31, green: 0.65, blue: 0.55)
     static let orange = Color(red: 0.9, green: 0.55, blue: 0.26)
+    static let cropSelected = Color(red: 0.90, green: 1.00, blue: 0.22)
+    static let cropFrameColors: [Color] = [
+        Color(red: 0.18, green: 0.96, blue: 1.00),   // bright cyan
+        Color(red: 0.42, green: 1.00, blue: 0.32),   // bright green
+        Color(red: 1.00, green: 0.34, blue: 0.92),   // bright magenta
+        Color(red: 1.00, green: 0.86, blue: 0.18),   // bright yellow
+        Color(red: 0.42, green: 0.62, blue: 1.00),   // bright blue
+        Color(red: 1.00, green: 0.46, blue: 0.20),   // bright orange
+    ]
     /// Cycled across adjacent crop frames so neighbouring boxes never share a
     /// colour — overlaps and mis-cuts stand out at a glance. Orange is reserved
     /// for the selected frame, so it's deliberately excluded here.
@@ -1381,9 +1571,9 @@ enum AppTheme {
 struct PanelStyle: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .background(LinearGradient(colors: [Color(red: 0.102, green: 0.115, blue: 0.138), Color(red: 0.078, green: 0.087, blue: 0.105)], startPoint: .top, endPoint: .bottom))
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.05)))
+            .background(Color(red: 0.078, green: 0.087, blue: 0.105))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.06)))
     }
 }
 
@@ -1396,11 +1586,11 @@ extension View {
 struct IconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(AppTheme.muted)
-            .frame(width: 30, height: 30)
-            .background(configuration.isPressed ? Color.white.opacity(0.08) : Color.white.opacity(0.025))
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .frame(width: 24, height: 24)
+            .background(configuration.isPressed ? Color.white.opacity(0.08) : Color.white.opacity(0.035))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 }
 
@@ -1409,16 +1599,16 @@ struct AccentIconButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 14, weight: .bold))
+            .font(.system(size: 11, weight: .bold))
             .foregroundStyle(color)
-            .frame(width: 31, height: 31)
+            .frame(width: 24, height: 24)
             .background(color.opacity(configuration.isPressed ? 0.24 : 0.14))
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay {
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: 5)
                     .stroke(color.opacity(configuration.isPressed ? 0.58 : 0.36), lineWidth: 1)
             }
-            .shadow(color: color.opacity(0.18), radius: 8, y: 3)
+            .shadow(color: color.opacity(0.1), radius: 2, y: 1)
             .opacity(configuration.isPressed ? 0.84 : 1)
     }
 }
@@ -1444,16 +1634,16 @@ struct ParameterActionButtonStyle: ButtonStyle {
 struct StartProcessButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 28, weight: .semibold))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(AppTheme.text)
-            .frame(width: 132, height: 50)
+            .frame(width: 44, height: 30)
             .background(AppTheme.green.opacity(configuration.isPressed ? 0.78 : 0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay {
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: 6)
                     .stroke(Color.white.opacity(configuration.isPressed ? 0.18 : 0.12))
             }
-            .shadow(color: AppTheme.green.opacity(0.22), radius: 8, y: 3)
+            .shadow(color: AppTheme.green.opacity(0.14), radius: 2, y: 1)
             .opacity(configuration.isPressed ? 0.86 : 1)
     }
 }
@@ -1470,6 +1660,22 @@ struct FilmstripNavButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 11)
                     .stroke(Color.white.opacity(0.05))
             }
+    }
+}
+
+struct FilmFrameCopyButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(AppTheme.text)
+            .frame(width: 20, height: 20)
+            .background(Color.black.opacity(configuration.isPressed ? 0.62 : 0.46))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.white.opacity(configuration.isPressed ? 0.24 : 0.14), lineWidth: 1)
+            }
+            .opacity(configuration.isPressed ? 0.82 : 1)
     }
 }
 
@@ -1496,11 +1702,11 @@ struct CandidateButtonStyle: ButtonStyle {
             .foregroundStyle(active ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
+            .frame(height: 30)
             .background(active ? AppTheme.blue.opacity(0.18) : Color.black.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 5)
                     .stroke(active ? AppTheme.blue.opacity(0.42) : Color.white.opacity(0.05))
             }
             .opacity(configuration.isPressed ? 0.82 : 1)
@@ -1512,15 +1718,13 @@ struct TemplateRetileButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(primary ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity)
-            .frame(height: 36)
+            .frame(width: 28, height: 26)
             .background(primary ? AppTheme.blue.opacity(configuration.isPressed ? 0.26 : 0.16) : Color.white.opacity(configuration.isPressed ? 0.075 : 0.035))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 5)
                     .stroke(primary ? AppTheme.blue.opacity(0.42) : Color.white.opacity(0.08))
             }
     }
@@ -1549,5 +1753,41 @@ private extension CGRect {
         let width = min(max(size.width, 0.05), 1 - x)
         let height = min(max(size.height, 0.05), 1 - y)
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    func movedInsideUnit() -> CGRect {
+        let width = min(max(Double(size.width), 0.05), 1)
+        let height = min(max(Double(size.height), 0.05), 1)
+        let x = min(max(Double(origin.x), 0), 1 - width)
+        let y = min(max(Double(origin.y), 0), 1 - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    func resized(
+        left proposedLeft: Double? = nil,
+        right proposedRight: Double? = nil,
+        top proposedTop: Double? = nil,
+        bottom proposedBottom: Double? = nil
+    ) -> CGRect {
+        let minimum = 0.05
+        var left = Double(minX)
+        var right = Double(maxX)
+        var top = Double(minY)
+        var bottom = Double(maxY)
+
+        if let proposedLeft {
+            left = min(proposedLeft, right - minimum)
+        }
+        if let proposedRight {
+            right = max(proposedRight, left + minimum)
+        }
+        if let proposedTop {
+            top = min(proposedTop, bottom - minimum)
+        }
+        if let proposedBottom {
+            bottom = max(proposedBottom, top + minimum)
+        }
+
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
     }
 }

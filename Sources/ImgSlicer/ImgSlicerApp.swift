@@ -46,6 +46,13 @@ struct ImgSlicerApp: App {
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
             }
+            CommandGroup(after: .pasteboard) {
+                Button("复制当前原图") {
+                    store.copySelectedOriginalToPasteboard()
+                }
+                .keyboardShortcut("c", modifiers: [.command])
+                .disabled(store.selectedPhoto == nil)
+            }
         }
     }
 }

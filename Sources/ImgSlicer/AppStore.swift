@@ -87,6 +87,15 @@ final class AppStore: ObservableObject {
         return photo.cropRegions.contains { $0.rect.width > 0.02 && $0.rect.height > 0.02 }
     }
 
+    var canRestoreSelectedPhotoAutomatic: Bool {
+        selectedPhoto?.hasLocalOverrides ?? false
+    }
+
+    var canCalibrateSelectedPhotoFromManualFrame: Bool {
+        guard let indexes = selectedIndexes() else { return false }
+        return selectedManualTemplateRegion(taskIndex: indexes.task, photoIndex: indexes.photo) != nil
+    }
+
     var recognitionMarginReference: CropMarginReference? {
         guard let photo = selectedPhoto else { return nil }
         let selectedCandidate = photo.selectedCandidateID.flatMap { candidateID in
@@ -96,7 +105,7 @@ final class AppStore: ObservableObject {
         if let selectedCandidate, let reference = marginReference(regions: selectedCandidate.regions, source: "识别框") {
             return reference
         }
-        return marginReference(regions: photo.cropRegions, source: photo.hasLocalOverrides ? "鎵嬪姩妗?" : "褰撳墠妗?")
+        return marginReference(regions: photo.cropRegions, source: photo.hasLocalOverrides ? "手动框" : "当前框")
     }
 
     func pickFiles() {
@@ -105,10 +114,27 @@ final class AppStore: ObservableObject {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.image, .folder]
-        panel.prompt = "瀵煎叆"
+        panel.prompt = "导入"
         panel.message = "选择图片文件或包含图片的文件夹"
         if panel.runModal() == .OK {
             importItems(panel.urls)
+        }
+    }
+
+    func copySelectedOriginalToPasteboard() {
+        guard let photo = selectedPhoto else { return }
+        copyOriginalToPasteboard(photo)
+    }
+
+    func copyOriginalToPasteboard(_ photo: PhotoItem) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if pasteboard.writeObjects([photo.url as NSURL]) {
+            logMessage = "已复制原图"
+            logSubMessage = photo.name
+        } else {
+            logMessage = "复制原图失败"
+            logSubMessage = photo.url.path
         }
     }
 
@@ -289,7 +315,38 @@ final class AppStore: ObservableObject {
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框角度，人工结果会优先保留。"
-        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) 路 \(String(format: "%.1f", angle))掳 鎵嬪姩鏃嬭浆"
+        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · \(String(format: "%.1f", angle))° 手动旋转"
+    }
+
+    func moveAllCropRegions(dxPixels: Double, dyPixels: Double) {
+        guard dxPixels != 0 || dyPixels != 0,
+              let indexes = selectedIndexes() else { return }
+
+        let photo = tasks[indexes.task].photos[indexes.photo]
+        let imageSize = NSImage(contentsOf: photo.url)?
+            .cgImage(forProposedRect: nil, context: nil, hints: nil)
+            .map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: 2000, height: 2000)
+        let dx = dxPixels / max(imageSize.width, 1)
+        let dy = dyPixels / max(imageSize.height, 1)
+
+        tasks[indexes.task].photos[indexes.photo].cropRegions = photo.cropRegions.map { region in
+            CropRegion(
+                id: region.id,
+                index: region.index,
+                rect: CGRect(
+                    x: region.rect.minX + dx,
+                    y: region.rect.minY + dy,
+                    width: region.rect.width,
+                    height: region.rect.height
+                ).normalizedCropRect,
+                angle: region.angle,
+                isManual: true
+            )
+        }
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已整体移动当前画布")
+        logMessage = "已整体移动当前画布。"
+        logSubMessage = "水平 \(String(format: "%+.0f", dxPixels)) px · 垂直 \(String(format: "%+.0f", dyPixels)) px"
     }
 
     /// Enters marquee mode: the next drag on the preview defines a brand-new
@@ -339,17 +396,17 @@ final class AppStore: ObservableObject {
 
     func deleteSelectedCrop(regionID: CropRegion.ID) {
         guard let indexes = selectedIndexes() else { return }
-        guard tasks[indexes.task].photos[indexes.photo].cropRegions.count > 1 else {
-            logMessage = "至少需要保留一个裁切框。"
-            logSubMessage = "可以拖动当前框调整到正确位置。"
-            return
-        }
         tasks[indexes.task].photos[indexes.photo].cropRegions.removeAll { $0.id == regionID }
         reindexRegions(taskIndex: indexes.task, photoIndex: indexes.photo)
         selectedCropRegionID = tasks[indexes.task].photos[indexes.photo].cropRegions.first?.id
         markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已删除多余裁切框")
-        logMessage = "已删除多余裁切框。"
-        logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 已重新编号"
+        if tasks[indexes.task].photos[indexes.photo].cropRegions.isEmpty {
+            logMessage = "已删除全部裁切框。"
+            logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 当前画布不会输出裁切结果"
+        } else {
+            logMessage = "已删除多余裁切框。"
+            logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 已重新编号"
+        }
     }
 
     func applySelectedCandidate(_ candidateID: CropCandidate.ID) {
@@ -489,7 +546,7 @@ final class AppStore: ObservableObject {
         let photoID = tasks[indexes.task].photos[indexes.photo].id
         let currentSettings = settings
         tasks[indexes.task].photos[indexes.photo].status = .locating
-        tasks[indexes.task].detail = "姝ｅ湪鎸夋爣鍑嗘鏍″噯褰撳墠鐢诲竷"
+        tasks[indexes.task].detail = "正在按标准框校准当前画布"
         logMessage = "正在应用标准框到当前画布。"
         logSubMessage = "使用选中框校准自动识别到的每个边缘。"
 
@@ -748,7 +805,7 @@ final class AppStore: ObservableObject {
         if tasks[taskIndex].photos[photoIndex].status != .autoDone {
             tasks[taskIndex].photos[photoIndex].status = .located
         }
-        tasks[taskIndex].detail = "宸插簲鐢ㄨ嚜鍔ㄦ晥鏋滐細\(candidate.title)"
+        tasks[taskIndex].detail = "已应用自动效果：\(candidate.title)"
         editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
         logMessage = "已应用 \(candidate.title)。"
         logSubMessage = "\(candidate.detail) · 可继续微调，切换图片会自动保存"
@@ -1018,5 +1075,3 @@ private extension CGRect {
         return CGRect(x: x, y: y, width: width, height: height)
     }
 }
-
-

@@ -59,9 +59,10 @@ struct BenchmarkCommand: Sendable {
 
         var rows: [Row] = []
         for url in imageFiles {
-            guard let truth = labels[url.lastPathComponent], !truth.isEmpty else { continue }
+            let key = relativePath(for: url)
+            guard let truth = labels[key], !truth.isEmpty else { continue }
             let detected = processor.detectCropRegions(for: url, settings: settings, sampleProfiles: sampleProfiles).map { $0.rect }
-            rows.append(Row(name: url.lastPathComponent, truth: truth, detected: detected, threshold: passThreshold))
+            rows.append(Row(name: key, truth: truth, detected: detected, threshold: passThreshold))
         }
 
         guard !rows.isEmpty else {
@@ -151,15 +152,20 @@ struct BenchmarkCommand: Sendable {
             // Only hand-adjusted entries are ground truth. The app also caches
             // auto-detected regions here; those would just have the detector
             // grade itself (IoU 1.0) and inflate the score.
-            guard edit.isManual == true else { continue }
+            guard edit.hasLocalOverrides == true else { continue }
             let rects = edit.regions.map {
                 CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
             }
-            // Key by file name so a flat folder import matches regardless of how
-            // the relative path was stored.
-            labels[(path as NSString).lastPathComponent] = rects
+            labels[path] = rects
         }
         return labels
+    }
+
+    private func relativePath(for url: URL) -> String {
+        let root = folderURL.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(root + "/") else { return url.lastPathComponent }
+        return String(path.dropFirst(root.count + 1))
     }
 
     struct MatchedPair {
@@ -240,8 +246,21 @@ struct BenchmarkCommand: Sendable {
     }
 
     private struct SavedPhotoEdit: Decodable {
-        let isManual: Bool?
+        let hasLocalOverrides: Bool?
         let regions: [SavedRect]
+
+        enum CodingKeys: String, CodingKey {
+            case hasLocalOverrides
+            case isManual
+            case regions
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            hasLocalOverrides = try container.decodeIfPresent(Bool.self, forKey: .hasLocalOverrides)
+                ?? container.decodeIfPresent(Bool.self, forKey: .isManual)
+            regions = try container.decode([SavedRect].self, forKey: .regions)
+        }
     }
 
     private struct SavedRect: Decodable {

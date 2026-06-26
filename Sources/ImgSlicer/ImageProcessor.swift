@@ -147,7 +147,7 @@ struct ImageProcessor: Sendable {
             )
             candidates = candidates.map { candidate in
                 CropCandidate(
-                    title: "鎺ヨЕ鍗版牱涓讳綋",
+                    title: "接触印样主体",
                     detail: "自动识别到 \(regions.count) 个主体区域",
                     regions: candidate.regions,
                     marginScale: 0,
@@ -238,8 +238,27 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
+                let sampleSplit = splitMergedFramesBySample(
+                    split,
+                    sampleProfiles: sampleProfiles,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                let deFragmented = mergeFragmentedSingleSubject(
+                    regions: sampleSplit,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                let pairSplit = splitWidePairByInternalGutter(
+                    regions: deFragmented,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
                 let snapped = snapVerticalBoundaries(
-                    regions: split,
+                    regions: pairSplit,
                     gray: fullGray.bytes,
                     width: fullGray.width,
                     height: fullGray.height
@@ -451,6 +470,499 @@ struct ImageProcessor: Sendable {
         let count = closeness(Double(candidate.regions.count), Double(profile.regionCount), scale: max(3, Double(profile.regionCount) * 0.5))
 
         return aspect * 0.36 + area * 0.22 + width * 0.16 + height * 0.16 + count * 0.10
+    }
+
+    /// Use saved sample profiles as a conservative layout prior to split boxes
+    /// that are obviously merged cells. This is deliberately geometry-only:
+    /// if a weak/dark gutter hides the boundary, pixel evidence may be absent,
+    /// but the outer edges and the sample's learned cell size still tell us
+    /// whether a box is one cell, two horizontal cells, or two vertical cells.
+    private func splitMergedFramesBySample(
+        _ regions: [CropRegion],
+        sampleProfiles: [SampleProfile],
+        gray: [UInt8],
+        width: Int,
+        height: Int
+    ) -> [CropRegion] {
+        guard !regions.isEmpty, !sampleProfiles.isEmpty else { return regions }
+
+        let rects = regions.map { $0.rect.normalized }
+        let averageWidth = rects.map { Double($0.width) }.average
+        let averageHeight = rects.map { Double($0.height) }.average
+        let aspect = averageWidth / max(averageHeight, 0.001)
+
+        let candidates = sampleProfiles
+            .filter { profile in
+                profile.regionCount > regions.count &&
+                profile.averageWidth > 0.02 &&
+                profile.averageHeight > 0.02 &&
+                abs(log(max(profile.aspectRatio, 0.001)) - log(max(aspect, 0.001))) < 1.35
+            }
+            .sorted {
+                let lhsGap = abs($0.regionCount - regions.count)
+                let rhsGap = abs($1.regionCount - regions.count)
+                if lhsGap != rhsGap { return lhsGap < rhsGap }
+                return $0.createdAt > $1.createdAt
+            }
+
+        for profile in candidates {
+            let weakSplitCount = sampleSplitCount(regions, targetWidth: profile.averageWidth, targetHeight: profile.averageHeight)
+            let split = splitMergedFrames(
+                regions,
+                targetWidth: profile.averageWidth,
+                targetHeight: profile.averageHeight,
+                gray: gray,
+                imageWidth: width,
+                imageHeight: height,
+                allowWeakGridSplit: regions.count >= 5 && (weakSplitCount == profile.regionCount || weakSplitCount == profile.regionCount - 1)
+            )
+            if split.count > regions.count, split.count == profile.regionCount || split.count == profile.regionCount - 1 {
+                let pruned = pruneEmptySubjectRegions(
+                    split,
+                    gray: gray,
+                    width: width,
+                    height: height,
+                    minimumCount: regions.count + 1
+                )
+                return pruned.count > regions.count ? pruned : split
+            }
+        }
+        return regions
+    }
+
+    private func splitMergedFrames(
+        _ regions: [CropRegion],
+        targetWidth: Double,
+        targetHeight: Double,
+        gray: [UInt8],
+        imageWidth: Int,
+        imageHeight: Int,
+        allowWeakGridSplit: Bool = false
+    ) -> [CropRegion] {
+        var output: [CropRegion] = []
+
+        for region in regions {
+            let r = region.rect.normalized
+            let xPieces = splitPieces(total: Double(r.width), target: targetWidth)
+            let yPieces = splitPieces(total: Double(r.height), target: targetHeight)
+
+            guard xPieces > 1 || yPieces > 1 else {
+                output.append(region)
+                continue
+            }
+            guard allowWeakGridSplit || hasInternalGutterEvidence(
+                rect: r,
+                xPieces: xPieces,
+                yPieces: yPieces,
+                gray: gray,
+                width: imageWidth,
+                height: imageHeight
+            ) else {
+                output.append(region)
+                continue
+            }
+
+            for row in 0..<yPieces {
+                let y: Double
+                let h: Double
+                if yPieces == 1 {
+                    y = Double(r.minY)
+                    h = Double(r.height)
+                } else {
+                    h = min(targetHeight, Double(r.height) / Double(yPieces) * 1.02)
+                    if row == 0 {
+                        y = Double(r.minY)
+                    } else if row == yPieces - 1 {
+                        y = Double(r.maxY) - h
+                    } else {
+                        let gap = (Double(r.height) - h * Double(yPieces)) / Double(max(1, yPieces - 1))
+                        y = Double(r.minY) + Double(row) * (h + max(0, gap))
+                    }
+                }
+
+                for col in 0..<xPieces {
+                    let x: Double
+                    let w: Double
+                    if xPieces == 1 {
+                        x = Double(r.minX)
+                        w = Double(r.width)
+                    } else {
+                        w = min(targetWidth, Double(r.width) / Double(xPieces) * 1.02)
+                        if col == 0 {
+                            x = Double(r.minX)
+                        } else if col == xPieces - 1 {
+                            x = Double(r.maxX) - w
+                        } else {
+                            let gap = (Double(r.width) - w * Double(xPieces)) / Double(max(1, xPieces - 1))
+                            x = Double(r.minX) + Double(col) * (w + max(0, gap))
+                        }
+                    }
+
+                    let rect = CGRect(x: x, y: y, width: w, height: h)
+                        .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                    guard !rect.isNull, rect.width > 0.02, rect.height > 0.02 else { continue }
+                    output.append(CropRegion(index: output.count + 1, rect: rect.normalized, angle: region.angle, isManual: region.isManual))
+                }
+            }
+        }
+
+        guard output.count > regions.count else { return regions }
+        return output.sorted {
+            let a = $0.rect.normalized
+            let b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > max(targetHeight * 0.35, 0.03) {
+                return Double(a.midY) < Double(b.midY)
+            }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    private func splitPieces(total: Double, target: Double) -> Int {
+        guard target > 0.02, total >= target * 1.45 else { return 1 }
+        let ratio = total / target
+        let pieces = Int(ratio.rounded())
+        guard pieces >= 2, pieces <= 4 else { return 1 }
+        let expected = target * Double(pieces)
+        guard total >= expected * 0.72, total <= expected * 1.75 else { return 1 }
+        return pieces
+    }
+
+    private func sampleSplitCount(_ regions: [CropRegion], targetWidth: Double, targetHeight: Double) -> Int {
+        regions.reduce(0) { count, region in
+            let r = region.rect.normalized
+            let xPieces = splitPieces(total: Double(r.width), target: targetWidth)
+            let yPieces = splitPieces(total: Double(r.height), target: targetHeight)
+            return count + max(1, xPieces * yPieces)
+        }
+    }
+
+    private func splitWidePairByInternalGutter(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count == 1,
+              let region = regions.first,
+              width > 8,
+              height > 8,
+              gray.count >= width * height else { return regions }
+        let r = region.rect.normalized
+        guard r.width > 0.70, r.height > 0.45 else { return regions }
+
+        let x0 = max(0, min(width - 1, Int(r.minX * Double(width))))
+        let x1 = max(x0 + 1, min(width, Int(r.maxX * Double(width))))
+        let y0 = max(0, min(height - 1, Int((r.minY + r.height * 0.08) * Double(height))))
+        let y1 = max(y0 + 1, min(height, Int((r.maxY - r.height * 0.08) * Double(height))))
+        guard x1 - x0 > 80, y1 - y0 > 40 else { return regions }
+
+        let searchStart = x0 + (x1 - x0) / 3
+        let searchEnd = x0 + (x1 - x0) * 2 / 3
+        let stepY = max(1, (y1 - y0) / 180)
+        var best: (score: Double, x: Int)? = nil
+        for x in searchStart..<searchEnd {
+            var dark = 0
+            var total = 0
+            var y = y0
+            while y < y1 {
+                if gray[y * width + x] <= 48 { dark += 1 }
+                total += 1
+                y += stepY
+            }
+            guard total > 0 else { continue }
+            let ratio = Double(dark) / Double(total)
+            if ratio > 0.42, best == nil || ratio > best!.score {
+                best = (ratio, x)
+            }
+        }
+        guard let cut = best?.x else { return regions }
+
+        let leftWidth = Double(cut - x0) / Double(width)
+        let rightWidth = Double(x1 - cut - 1) / Double(width)
+        guard min(leftWidth, rightWidth) / max(leftWidth, rightWidth) >= 0.70 else { return regions }
+
+        let left = CGRect(
+            x: Double(x0) / Double(width),
+            y: r.minY,
+            width: leftWidth,
+            height: r.height
+        ).normalized
+        let right = CGRect(
+            x: Double(cut + 1) / Double(width),
+            y: r.minY,
+            width: rightWidth,
+            height: r.height
+        ).normalized
+        guard left.width > 0.18, right.width > 0.18 else { return regions }
+        return [
+            CropRegion(index: 1, rect: left, angle: region.angle, isManual: region.isManual),
+            CropRegion(index: 2, rect: right, angle: region.angle, isManual: region.isManual)
+        ]
+    }
+
+    private func hasInternalGutterEvidence(
+        rect: CGRect,
+        xPieces: Int,
+        yPieces: Int,
+        gray: [UInt8],
+        width: Int,
+        height: Int
+    ) -> Bool {
+        guard width > 8, height > 8, gray.count >= width * height else { return false }
+        let x0 = max(0, min(width - 1, Int(rect.minX * Double(width))))
+        let x1 = max(x0 + 1, min(width, Int(rect.maxX * Double(width))))
+        let y0 = max(0, min(height - 1, Int(rect.minY * Double(height))))
+        let y1 = max(y0 + 1, min(height, Int(rect.maxY * Double(height))))
+        guard x1 - x0 > 24, y1 - y0 > 24 else { return false }
+
+        func statsForColumn(_ x: Int, yRange: Range<Int>) -> (mean: Double, std: Double) {
+            var sum = 0.0, sq = 0.0
+            for y in yRange {
+                let v = Double(gray[y * width + x])
+                sum += v
+                sq += v * v
+            }
+            let n = Double(max(1, yRange.count))
+            let m = sum / n
+            return (m, max(0, sq / n - m * m).squareRoot())
+        }
+
+        func statsForRow(_ y: Int, xRange: Range<Int>) -> (mean: Double, std: Double) {
+            var sum = 0.0, sq = 0.0
+            for x in xRange {
+                let v = Double(gray[y * width + x])
+                sum += v
+                sq += v * v
+            }
+            let n = Double(max(1, xRange.count))
+            let m = sum / n
+            return (m, max(0, sq / n - m * m).squareRoot())
+        }
+
+        let darkMean = 82.0
+        let flatStd = 28.0
+        let xInset = max(2, (x1 - x0) / 8)
+        let yInset = max(2, (y1 - y0) / 8)
+        let xRange = (x0 + xInset)..<max(x0 + xInset + 1, x1 - xInset)
+        let yRange = (y0 + yInset)..<max(y0 + yInset + 1, y1 - yInset)
+
+        if xPieces > 1 {
+            for i in 1..<xPieces {
+                let target = x0 + (x1 - x0) * i / xPieces
+                let win = max(6, (x1 - x0) / (xPieces * 8))
+                var found = false
+                for x in max(x0 + 2, target - win)..<min(x1 - 2, target + win) {
+                    let s = statsForColumn(x, yRange: yRange)
+                    if s.mean <= darkMean, s.std <= flatStd {
+                        found = true
+                        break
+                    }
+                }
+                if !found { return false }
+            }
+        }
+
+        if yPieces > 1 {
+            for i in 1..<yPieces {
+                let target = y0 + (y1 - y0) * i / yPieces
+                let win = max(6, (y1 - y0) / (yPieces * 8))
+                var found = false
+                for y in max(y0 + 2, target - win)..<min(y1 - 2, target + win) {
+                    let s = statsForRow(y, xRange: xRange)
+                    if s.mean <= darkMean, s.std <= flatStd {
+                        found = true
+                        break
+                    }
+                }
+                if !found { return false }
+            }
+        }
+
+        return true
+    }
+
+    private func pruneEmptySubjectRegions(
+        _ regions: [CropRegion],
+        gray: [UInt8],
+        width: Int,
+        height: Int,
+        minimumCount: Int
+    ) -> [CropRegion] {
+        guard regions.count > minimumCount, width > 8, height > 8, gray.count >= width * height else { return regions }
+
+        let kept = regions.filter { region in
+            subjectPresenceScore(rect: region.rect.normalized, gray: gray, width: width, height: height) >= 0.18
+        }
+        guard kept.count >= minimumCount, kept.count < regions.count else { return regions }
+        return kept.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
+        }
+    }
+
+    private func subjectPresenceScore(rect: CGRect, gray: [UInt8], width: Int, height: Int) -> Double {
+        let x0 = max(0, min(width - 1, Int(rect.minX * Double(width))))
+        let x1 = max(x0 + 1, min(width, Int(rect.maxX * Double(width))))
+        let y0 = max(0, min(height - 1, Int(rect.minY * Double(height))))
+        let y1 = max(y0 + 1, min(height, Int(rect.maxY * Double(height))))
+        guard x1 - x0 > 12, y1 - y0 > 12 else { return 0 }
+
+        let insetX = max(1, (x1 - x0) / 10)
+        let insetY = max(1, (y1 - y0) / 10)
+        let sx0 = min(x1 - 1, x0 + insetX)
+        let sx1 = max(sx0 + 1, x1 - insetX)
+        let sy0 = min(y1 - 1, y0 + insetY)
+        let sy1 = max(sy0 + 1, y1 - insetY)
+        let stepX = max(1, (sx1 - sx0) / 80)
+        let stepY = max(1, (sy1 - sy0) / 80)
+
+        var count = 0
+        var sum = 0.0
+        var sq = 0.0
+        var midtone = 0
+        var extreme = 0
+        var edgeSum = 0.0
+        var edgeCount = 0
+
+        var y = sy0
+        while y < sy1 {
+            var x = sx0
+            while x < sx1 {
+                let v = Double(gray[y * width + x])
+                sum += v
+                sq += v * v
+                count += 1
+                if v > 34, v < 242 { midtone += 1 }
+                if v <= 18 || v >= 248 { extreme += 1 }
+                if x + stepX < sx1 {
+                    edgeSum += abs(v - Double(gray[y * width + min(sx1 - 1, x + stepX)]))
+                    edgeCount += 1
+                }
+                if y + stepY < sy1 {
+                    edgeSum += abs(v - Double(gray[min(sy1 - 1, y + stepY) * width + x]))
+                    edgeCount += 1
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+
+        guard count > 0 else { return 0 }
+        let n = Double(count)
+        let mean = sum / n
+        let std = max(0, sq / n - mean * mean).squareRoot()
+        let midtoneRatio = Double(midtone) / n
+        let extremeRatio = Double(extreme) / n
+        let edge = edgeCount > 0 ? edgeSum / Double(edgeCount) : 0
+
+        // Empty cells are almost always smooth black/white scanner/film base.
+        // Real subjects may be dark, but they still carry either midtones or
+        // small texture/edges once sampled across the interior.
+        if extremeRatio > 0.88, std < 7, edge < 4 { return 0 }
+        if mean < 16, std < 5, edge < 3 { return 0 }
+        if mean > 248, std < 4, edge < 3 { return 0 }
+
+        let textureScore = min(1, std / 28)
+        let edgeScore = min(1, edge / 18)
+        let toneScore = min(1, midtoneRatio / 0.22)
+        return textureScore * 0.42 + edgeScore * 0.34 + toneScore * 0.24
+    }
+
+    /// Foreground/component detectors can split one ordinary photo into several
+    /// "subjects" (people, clothes, background blocks). For film slicing we only
+    /// want multiple regions when real scanner/film gutters separate them. If a
+    /// handful of tall same-row boxes are separated by normal image content
+    /// instead of flat bright/dark gutters, merge them back into one theme.
+    private func mergeFragmentedSingleSubject(
+        regions: [CropRegion],
+        gray: [UInt8],
+        width: Int,
+        height: Int
+    ) -> [CropRegion] {
+        guard (2...10).contains(regions.count), width > 8, height > 8, gray.count >= width * height else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        let union = rects.dropFirst().reduce(rects[0]) { $0.union($1) }.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !union.isNull else { return regions }
+        let unionArea = Double(union.width * union.height)
+        let largestArea = rects.map { Double($0.width * $0.height) }.max() ?? 0
+
+        // A common single-photo failure shape is "one large body box plus a few
+        // edge/header fragments" (white scanner border, lanterns, text blocks).
+        // In a real film grid no single cell dominates the union like this.
+        if unionArea > 0.48, largestArea / max(unionArea, 0.001) > 0.46 {
+            return [CropRegion(index: 1, rect: union.normalized, angle: regions.first?.angle ?? 0, isManual: false)]
+        }
+
+        let heights = rects.map { Double($0.height) }
+        guard let minH = heights.min(), let maxH = heights.max(), minH > 0.55, maxH / minH < 1.8 else { return regions }
+
+        let centresY = rects.map { Double($0.midY) }
+        let meanY = centresY.reduce(0, +) / Double(centresY.count)
+        let spreadY = centresY.map { abs($0 - meanY) }.max() ?? 1
+        guard spreadY < 0.12 else { return regions }
+
+        let sorted = rects.sorted { $0.minX < $1.minX }
+        let gaps = zip(sorted, sorted.dropFirst()).map { (left: $0, right: $1) }
+        guard !gaps.isEmpty else { return regions }
+        let gutterCount = gaps.filter { hasSeparatorGutter(between: $0.left, and: $0.right, gray: gray, width: width, height: height) }.count
+        guard gutterCount == 0 else { return regions }
+
+        guard !union.isNull, union.width > 0.35, union.height > 0.55 else { return regions }
+        return [CropRegion(index: 1, rect: union.normalized, angle: regions.first?.angle ?? 0, isManual: false)]
+    }
+
+    private func hasSeparatorGutter(between left: CGRect, and right: CGRect, gray: [UInt8], width: Int, height: Int) -> Bool {
+        let gapLeft = Double(left.maxX)
+        let gapRight = Double(right.minX)
+        let yTop = max(Double(left.minY), Double(right.minY))
+        let yBottom = min(Double(left.maxY), Double(right.maxY))
+        guard yBottom - yTop > 0.25 else { return false }
+
+        let boundary = (gapLeft + gapRight) / 2
+        let halfBand = max(0.004, min(0.018, max(gapRight - gapLeft, 0) / 2 + 0.006))
+        let x0 = max(0, min(width - 1, Int((boundary - halfBand) * Double(width))))
+        let x1 = max(x0 + 1, min(width, Int((boundary + halfBand) * Double(width))))
+        let y0 = max(0, min(height - 1, Int((yTop + (yBottom - yTop) * 0.12) * Double(height))))
+        let y1 = max(y0 + 1, min(height, Int((yBottom - (yBottom - yTop) * 0.12) * Double(height))))
+        guard x1 - x0 >= 2, y1 - y0 >= 12 else { return false }
+
+        let stepX = max(1, (x1 - x0) / 20)
+        let stepY = max(1, (y1 - y0) / 120)
+        var x = x0
+        while x < x1 {
+            var dark = 0
+            var total = 0
+            var y = y0
+            while y < y1 {
+                if gray[y * width + x] <= 52 { dark += 1 }
+                total += 1
+                y += stepY
+            }
+            if total > 0, Double(dark) / Double(total) > 0.62 {
+                return true
+            }
+            x += stepX
+        }
+
+        var count = 0
+        var sum = 0.0
+        var sq = 0.0
+        var darkOrBright = 0
+        var y = y0
+        while y < y1 {
+            var x = x0
+            while x < x1 {
+                let v = Double(gray[y * width + x])
+                sum += v
+                sq += v * v
+                count += 1
+                if v <= 40 || v >= 235 { darkOrBright += 1 }
+                x += stepX
+            }
+            y += stepY
+        }
+        guard count > 0 else { return false }
+        let n = Double(count)
+        let mean = sum / n
+        let std = max(0, sq / n - mean * mean).squareRoot()
+        let extremeRatio = Double(darkOrBright) / n
+        return extremeRatio > 0.78 && (mean < 58 || mean > 222) && std < 18
     }
 
 
@@ -1596,7 +2108,7 @@ struct ImageProcessor: Sendable {
     /// Split a frame that actually holds two (or more) photos because the 600px
     /// pass missed the dark gutter between them — common when both neighbours
     /// are dark (an aquarium strip). A frame much wider than the strip's median
-    /// is a merge of k鈮坵idth/median photos; the hidden gutter near each expected
+    /// is a merge of k≈width/median photos; the hidden gutter near each expected
     /// boundary is recovered at full resolution (the darkest flat column) and
     /// the frame is cut there. Conservative: only fires when EVERY expected
     /// gutter is actually found, so a genuinely wide single frame is left alone.
@@ -3957,4 +4469,3 @@ private extension Array where Element == Double {
         return reduce(0, +) / Double(count)
     }
 }
-
