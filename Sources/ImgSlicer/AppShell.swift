@@ -18,6 +18,21 @@ struct AppShell: View {
         .overlay(DropZoneOverlay())
         .focusable()
         .onMoveCommand { direction in
+            if store.selectedCropRegionID != nil {
+                switch direction {
+                case .left:
+                    store.moveSelectedCropRegion(dxPixels: -1, dyPixels: 0)
+                case .right:
+                    store.moveSelectedCropRegion(dxPixels: 1, dyPixels: 0)
+                case .up:
+                    store.moveSelectedCropRegion(dxPixels: 0, dyPixels: -1)
+                case .down:
+                    store.moveSelectedCropRegion(dxPixels: 0, dyPixels: 1)
+                default:
+                    break
+                }
+                return
+            }
             switch direction {
             case .left:
                 store.selectPreviousPhoto()
@@ -38,15 +53,15 @@ struct AppShell: View {
                 set: { if !$0 { store.manualRedetectPrompt = nil } }
             ),
             presenting: store.manualRedetectPrompt
-        ) { _ in
-            Button("重新识别（丢弃手动修正）", role: .destructive) {
+        ) { prompt in
+            Button(prompt.actionTitle, role: .destructive) {
                 store.confirmManualRedetect()
             }
             Button("保留手动修正", role: .cancel) {
                 store.manualRedetectPrompt = nil
             }
         } message: { prompt in
-            Text("「\(prompt.photoName)」已被手动调整。重新识别会用自动结果替换这些手动框，且无法撤销。")
+            Text("「\(prompt.photoName)」已被手动调整。\(prompt.message)")
         }
         .alert(
             store.startProcessingPrompt?.title ?? "开始处理",
@@ -91,6 +106,9 @@ struct AppShell: View {
                 .disabled(!store.isDrawingNewRegion)
             Button("Copy original") { store.copySelectedOriginalToPasteboard() }
                 .keyboardShortcut("c", modifiers: [.command])
+                .disabled(store.selectedPhoto == nil)
+            Button("New frame") { store.toggleDrawNewRegion() }
+                .keyboardShortcut(.space, modifiers: [])
                 .disabled(store.selectedPhoto == nil)
         }
         .opacity(0)
@@ -551,48 +569,161 @@ private extension Comparable {
 }
 
 struct MultiCropOverlay: View {
+    private static let canvasCoordinateSpace = "multi-crop-overlay-canvas"
     let regions: [CropRegion]
     let selectedRegionID: CropRegion.ID?
     let onDelete: (CropRegion.ID) -> Void
     let onSelect: (CropRegion.ID) -> Void
     let onChange: (CropRegion.ID, CGRect) -> Void
+    @State private var dragState: CropDragState?
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(regions) { region in
-                CropOverlay(region: region, isSelected: region.id == selectedRegionID, onDelete: {
-                    onDelete(region.id)
-                }, onSelect: {
-                    onSelect(region.id)
-                }) { rect in
-                    onChange(region.id, rect)
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                ForEach(regions) { region in
+                    CropOverlay(
+                        region: displayRegion(for: region),
+                        isSelected: region.id == selectedRegionID || dragState?.regionID == region.id,
+                        isDragging: dragState?.regionID == region.id,
+                        onDelete: {
+                            onDelete(region.id)
+                        },
+                        onSelect: {
+                            onSelect(region.id)
+                        }
+                    )
+                    // Selected box floats above its neighbours so overlapping frames
+                    // never steal the drag — you always manipulate the one you picked.
+                    .zIndex(region.id == selectedRegionID || dragState?.regionID == region.id ? 1 : 0)
                 }
-                // Selected box floats above its neighbours so overlapping frames
-                // never steal the drag — you always manipulate the one you picked.
-                .zIndex(region.id == selectedRegionID ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .coordinateSpace(name: Self.canvasCoordinateSpace)
+            .highPriorityGesture(canvasDragGesture(in: proxy.size))
+            .transaction { transaction in
+                transaction.animation = nil
             }
         }
+    }
+
+    private func displayRegion(for region: CropRegion) -> CropRegion {
+        guard let dragState, dragState.regionID == region.id else { return region }
+        return CropRegion(
+            id: region.id,
+            index: region.index,
+            rect: dragState.currentRect,
+            angle: region.angle,
+            isManual: region.isManual
+        )
+    }
+
+    private func canvasDragGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .named(Self.canvasCoordinateSpace))
+            .onChanged { value in
+                if dragState == nil {
+                    guard let hit = hitTest(at: value.startLocation, in: size) else { return }
+                    dragState = CropDragState(
+                        regionID: hit.region.id,
+                        startPoint: value.startLocation,
+                        startRect: hit.region.rect,
+                        currentRect: hit.region.rect,
+                        angle: hit.region.angle,
+                        corner: hit.corner,
+                        edge: hit.edge
+                    )
+                }
+                guard var state = dragState else { return }
+                let screenDX = (value.location.x - state.startPoint.x) / max(1, size.width)
+                let screenDY = (value.location.y - state.startPoint.y) / max(1, size.height)
+                let local = state.localTranslation(dx: screenDX, dy: screenDY)
+                let next: CGRect
+                if let corner = state.corner {
+                    next = state.startRect.resized(corner: corner, dx: local.dx, dy: local.dy)
+                } else if let edge = state.edge {
+                    next = state.startRect.resized(edge: edge, dx: local.dx, dy: local.dy)
+                } else {
+                    next = CGRect(
+                        x: state.startRect.minX + screenDX,
+                        y: state.startRect.minY + screenDY,
+                        width: state.startRect.width,
+                        height: state.startRect.height
+                    )
+                }
+                state.currentRect = next
+                dragState = state
+            }
+            .onEnded { _ in
+                guard let state = dragState else { return }
+                onChange(state.regionID, state.currentRect.normalized)
+                onSelect(state.regionID)
+                dragState = nil
+            }
+    }
+
+    private func hitTest(at point: CGPoint, in size: CGSize) -> CropDragHit? {
+        let ordered = regions.sorted {
+            if $0.id == selectedRegionID { return true }
+            if $1.id == selectedRegionID { return false }
+            return $0.index > $1.index
+        }
+        for region in ordered {
+            let rect = CGRect(
+                x: region.rect.minX * size.width,
+                y: region.rect.minY * size.height,
+                width: region.rect.width * size.width,
+                height: region.rect.height * size.height
+            )
+            let expanded = rect.insetBy(dx: -10, dy: -10)
+            guard expanded.contains(point) else { continue }
+            if let corner = CropCorner.allCases.first(where: { distance($0.point(in: rect), point) <= 14 }) {
+                return CropDragHit(region: region, corner: corner, edge: nil)
+            }
+            if region.id == selectedRegionID,
+               let edge = CropEdge.allCases.first(where: { edgeHit($0, rect: rect, point: point) }) {
+                return CropDragHit(region: region, corner: nil, edge: edge)
+            }
+            if rect.contains(point) {
+                return CropDragHit(region: region, corner: nil, edge: nil)
+            }
+        }
+        return nil
+    }
+
+    private func edgeHit(_ edge: CropEdge, rect: CGRect, point: CGPoint) -> Bool {
+        let tolerance: CGFloat = 12
+        switch edge {
+        case .top:
+            return abs(point.y - rect.minY) <= tolerance && point.x >= rect.minX && point.x <= rect.maxX
+        case .bottom:
+            return abs(point.y - rect.maxY) <= tolerance && point.x >= rect.minX && point.x <= rect.maxX
+        case .left:
+            return abs(point.x - rect.minX) <= tolerance && point.y >= rect.minY && point.y <= rect.maxY
+        case .right:
+            return abs(point.x - rect.maxX) <= tolerance && point.y >= rect.minY && point.y <= rect.maxY
+        }
+    }
+
+    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        hypot(a.x - b.x, a.y - b.y)
     }
 }
 
 struct CropOverlay: View {
     let region: CropRegion
     let isSelected: Bool
+    let isDragging: Bool
     let onDelete: () -> Void
     let onSelect: () -> Void
-    let onChange: (CGRect) -> Void
-    @State private var workingRect: CGRect?
-    @State private var dragStartRect: CGRect?
-    @State private var isDragging = false
 
     var body: some View {
         GeometryReader { proxy in
-            let current = workingRect ?? region.rect
+            let current = region.rect
+            let hitRect = current
             let draw = CGRect(
-                x: current.minX * proxy.size.width,
-                y: current.minY * proxy.size.height,
-                width: current.width * proxy.size.width,
-                height: current.height * proxy.size.height
+                x: hitRect.minX * proxy.size.width,
+                y: hitRect.minY * proxy.size.height,
+                width: hitRect.width * proxy.size.width,
+                height: hitRect.height * proxy.size.height
             )
 
             ZStack(alignment: .topLeading) {
@@ -621,8 +752,10 @@ struct CropOverlay: View {
                         .stroke(activeColor, lineWidth: isSelected ? 1.1 : 0.9)
                         .background(Rectangle().fill(Color.black.opacity(0.001)))
                         .frame(width: draw.width, height: draw.height)
-                        .shadow(color: activeColor.opacity(isSelected ? 0.78 : 0.55), radius: isSelected ? 3 : 2)
-                        .gesture(dragGesture(in: proxy.size, corner: nil))
+                        .shadow(
+                            color: isDragging ? .clear : activeColor.opacity(isSelected ? 0.78 : 0.55),
+                            radius: isDragging ? 0 : (isSelected ? 3 : 2)
+                        )
                         .onTapGesture { onSelect() }
 
                     Text("\(region.index)")
@@ -650,7 +783,6 @@ struct CropOverlay: View {
                             .overlay(Circle().stroke(activeColor, lineWidth: 0.8))
                             .frame(width: isSelected ? 9 : 7, height: isSelected ? 9 : 7)
                             .position(corner.point(in: CGRect(origin: .zero, size: draw.size)))
-                            .gesture(dragGesture(in: proxy.size, corner: corner))
                     }
 
                     if isSelected {
@@ -662,7 +794,6 @@ struct CropOverlay: View {
                                 )
                                 .contentShape(Rectangle())
                                 .position(edge.point(in: CGRect(origin: .zero, size: draw.size)))
-                                .gesture(dragGesture(in: proxy.size, edge: edge))
                                 .help("拖动调整裁切框边缘")
                         }
                     }
@@ -670,10 +801,7 @@ struct CropOverlay: View {
                 .frame(width: draw.width, height: draw.height, alignment: .topLeading)
                 .rotationEffect(.degrees(region.angle))
                 .position(x: draw.midX, y: draw.midY)
-            }
-            .onChange(of: region.rect) { _, newValue in
-                guard !isDragging else { return }
-                workingRect = newValue
+                .opacity(isDragging ? 0.72 : 1)
             }
             .transaction { transaction in
                 transaction.animation = nil
@@ -689,65 +817,32 @@ struct CropOverlay: View {
         return palette[max(0, region.index - 1) % palette.count]
     }
 
-    private func dragGesture(in size: CGSize, corner: CropCorner? = nil, edge: CropEdge? = nil) -> some Gesture {
-        DragGesture()
-            .onChanged { value in
-                if !isDragging {
-                    isDragging = true
-                    let startRect = workingRect ?? region.rect
-                    dragStartRect = startRect
-                    workingRect = startRect
-                    onSelect()
-                }
-                let dx = value.translation.width / max(1, size.width)
-                let dy = value.translation.height / max(1, size.height)
-                let startRect = dragStartRect ?? region.rect
-                let next: CGRect
-                if let corner {
-                    next = constrainedResize(rect: startRect, corner: corner, dx: dx, dy: dy)
-                } else if let edge {
-                    next = constrainedResize(rect: startRect, edge: edge, dx: dx, dy: dy)
-                } else {
-                    var moved = startRect
-                    moved.origin.x += dx
-                    moved.origin.y += dy
-                    next = moved
-                }
-                workingRect = next
-            }
-            .onEnded { _ in
-                if let workingRect {
-                    onChange(workingRect.normalized)
-                }
-                dragStartRect = nil
-                isDragging = false
-            }
-    }
+}
 
-    private func constrainedResize(rect: CGRect, corner: CropCorner, dx: Double, dy: Double) -> CGRect {
-        switch corner {
-        case .topLeft:
-            return rect.resized(left: Double(rect.minX) + dx, top: Double(rect.minY) + dy)
-        case .topRight:
-            return rect.resized(right: Double(rect.maxX) + dx, top: Double(rect.minY) + dy)
-        case .bottomLeft:
-            return rect.resized(left: Double(rect.minX) + dx, bottom: Double(rect.maxY) + dy)
-        case .bottomRight:
-            return rect.resized(right: Double(rect.maxX) + dx, bottom: Double(rect.maxY) + dy)
-        }
-    }
+private struct CropDragHit {
+    let region: CropRegion
+    let corner: CropCorner?
+    let edge: CropEdge?
+}
 
-    private func constrainedResize(rect: CGRect, edge: CropEdge, dx: Double, dy: Double) -> CGRect {
-        switch edge {
-        case .top:
-            return rect.resized(top: Double(rect.minY) + dy)
-        case .bottom:
-            return rect.resized(bottom: Double(rect.maxY) + dy)
-        case .left:
-            return rect.resized(left: Double(rect.minX) + dx)
-        case .right:
-            return rect.resized(right: Double(rect.maxX) + dx)
-        }
+private struct CropDragState {
+    let regionID: CropRegion.ID
+    let startPoint: CGPoint
+    let startRect: CGRect
+    var currentRect: CGRect
+    let angle: Double
+    let corner: CropCorner?
+    let edge: CropEdge?
+
+    func localTranslation(dx: Double, dy: Double) -> (dx: Double, dy: Double) {
+        guard abs(angle) > 0.001 else { return (dx, dy) }
+        let radians = -angle * .pi / 180
+        let cosA = cos(radians)
+        let sinA = sin(radians)
+        return (
+            dx: dx * cosA - dy * sinA,
+            dy: dx * sinA + dy * cosA
+        )
     }
 }
 
@@ -1789,5 +1884,31 @@ private extension CGRect {
         }
 
         return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    func resized(corner: CropCorner, dx: Double, dy: Double) -> CGRect {
+        switch corner {
+        case .topLeft:
+            return resized(left: Double(minX) + dx, top: Double(minY) + dy)
+        case .topRight:
+            return resized(right: Double(maxX) + dx, top: Double(minY) + dy)
+        case .bottomLeft:
+            return resized(left: Double(minX) + dx, bottom: Double(maxY) + dy)
+        case .bottomRight:
+            return resized(right: Double(maxX) + dx, bottom: Double(maxY) + dy)
+        }
+    }
+
+    func resized(edge: CropEdge, dx: Double, dy: Double) -> CGRect {
+        switch edge {
+        case .top:
+            return resized(top: Double(minY) + dy)
+        case .bottom:
+            return resized(bottom: Double(maxY) + dy)
+        case .left:
+            return resized(left: Double(minX) + dx)
+        case .right:
+            return resized(right: Double(maxX) + dx)
+        }
     }
 }

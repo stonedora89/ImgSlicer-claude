@@ -153,7 +153,8 @@ struct BenchmarkCommand: Sendable {
             // auto-detected regions here; those would just have the detector
             // grade itself (IoU 1.0) and inflate the score.
             guard edit.hasLocalOverrides == true else { continue }
-            let rects = edit.regions.map {
+            let manualRegions = edit.manualRegions ?? edit.regions
+            let rects = manualRegions.map {
                 CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
             }
             labels[path] = rects
@@ -248,11 +249,13 @@ struct BenchmarkCommand: Sendable {
     private struct SavedPhotoEdit: Decodable {
         let hasLocalOverrides: Bool?
         let regions: [SavedRect]
+        let manualRegions: [SavedRect]?
 
         enum CodingKeys: String, CodingKey {
             case hasLocalOverrides
             case isManual
             case regions
+            case manualRegions
         }
 
         init(from decoder: Decoder) throws {
@@ -260,6 +263,7 @@ struct BenchmarkCommand: Sendable {
             hasLocalOverrides = try container.decodeIfPresent(Bool.self, forKey: .hasLocalOverrides)
                 ?? container.decodeIfPresent(Bool.self, forKey: .isManual)
             regions = try container.decode([SavedRect].self, forKey: .regions)
+            manualRegions = try container.decodeIfPresent([SavedRect].self, forKey: .manualRegions)
         }
     }
 

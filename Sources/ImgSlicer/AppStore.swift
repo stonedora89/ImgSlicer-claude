@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct ManualRedetectPrompt: Identifiable {
     let id = UUID()
     let photoName: String
+    let actionTitle: String
+    let message: String
     let action: () -> Void
 }
 
@@ -290,9 +292,7 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].detail = "已保存人工微调结果"
         editStore.save(photo: tasks[indexes.task].photos[indexes.photo], in: tasks[indexes.task])
         let photo = tasks[indexes.task].photos[indexes.photo]
-        let rootURL = tasks[indexes.task].rootURL
-        editStore.remove(photoRelativePath: photo.relativePath, rootURL: rootURL)
-        sampleLibrary.removeProfiles(sourceName: photo.name, rootURL: rootURL)
+        sampleLibrary.removeProfiles(sourceName: photo.name, rootURL: tasks[indexes.task].rootURL)
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框，人工结果会优先保留。"
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · 手动微调已作为参考样本"
@@ -316,6 +316,33 @@ final class AppStore: ObservableObject {
         saveSampleProfileIfPossible(taskIndex: indexes.task, photoIndex: indexes.photo)
         logMessage = "已更新裁切框角度，人工结果会优先保留。"
         logSubMessage = "\(tasks[indexes.task].photos[indexes.photo].name) · \(String(format: "%.1f", angle))° 手动旋转"
+    }
+
+    func moveSelectedCropRegion(dxPixels: Double, dyPixels: Double) {
+        guard dxPixels != 0 || dyPixels != 0,
+              let regionID = selectedCropRegionID,
+              let indexes = selectedIndexes() else { return }
+
+        let photo = tasks[indexes.task].photos[indexes.photo]
+        guard let regionIndex = photo.cropRegions.firstIndex(where: { $0.id == regionID }) else { return }
+        let imageSize = NSImage(contentsOf: photo.url)?
+            .cgImage(forProposedRect: nil, context: nil, hints: nil)
+            .map { CGSize(width: $0.width, height: $0.height) }
+            ?? CGSize(width: 2000, height: 2000)
+        let dx = dxPixels / max(imageSize.width, 1)
+        let dy = dyPixels / max(imageSize.height, 1)
+        var region = photo.cropRegions[regionIndex]
+        region.rect = CGRect(
+            x: region.rect.minX + dx,
+            y: region.rect.minY + dy,
+            width: region.rect.width,
+            height: region.rect.height
+        ).normalizedCropRect
+        region.isManual = true
+        tasks[indexes.task].photos[indexes.photo].cropRegions[regionIndex] = region
+        markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已移动选中框")
+        logMessage = "已移动选中框。"
+        logSubMessage = "水平 \(String(format: "%+.0f", dxPixels)) px · 垂直 \(String(format: "%+.0f", dyPixels)) px"
     }
 
     func moveAllCropRegions(dxPixels: Double, dyPixels: Double) {
@@ -356,8 +383,8 @@ final class AppStore: ObservableObject {
         guard selectedPhoto != nil else { return }
         isDrawingNewRegion.toggle()
         if isDrawingNewRegion {
-            logMessage = "已退出框选模式。"
-            logSubMessage = ""
+            logMessage = "拖动画布新建选择框。"
+            logSubMessage = "按空格或 Esc 可退出"
         } else {
             logMessage = "已退出框选模式。"
             logSubMessage = ""
@@ -410,6 +437,15 @@ final class AppStore: ObservableObject {
     }
 
     func applySelectedCandidate(_ candidateID: CropCandidate.ID) {
+        guardingManualCorrections(
+            actionTitle: "使用自动结果（丢弃手动修正）",
+            message: "使用自动识别结果会替换当前手动框，并清除这张图片的手动覆盖。"
+        ) { [weak self] in
+            self?.performApplySelectedCandidate(candidateID)
+        }
+    }
+
+    private func performApplySelectedCandidate(_ candidateID: CropCandidate.ID) {
         guard let indexes = selectedIndexes(),
               let candidate = tasks[indexes.task].photos[indexes.photo].cropCandidates.first(where: { $0.id == candidateID }) else { return }
         applyCandidate(candidate, taskIndex: indexes.task, photoIndex: indexes.photo)
@@ -463,19 +499,26 @@ final class AppStore: ObservableObject {
     /// first — re-detection replaces the hand-adjusted boxes with fresh
     /// automatic ones, so it must never wipe a correction silently.
     func redetectSelectedPhoto() {
-        guardingManualCorrections { [weak self] in self?.performRedetectSelectedPhoto() }
+        guardingManualCorrections(
+            actionTitle: "重新识别（丢弃手动修正）",
+            message: "重新识别会用新的自动结果替换这些手动框，并清除这张图片的手动覆盖。"
+        ) { [weak self] in self?.performRedetectSelectedPhoto() }
     }
 
     /// Run `action` immediately unless the selected photo is manually corrected,
     /// in which case stage a confirmation prompt instead.
-    private func guardingManualCorrections(_ action: @escaping () -> Void) {
+    private func guardingManualCorrections(
+        actionTitle: String,
+        message: String,
+        _ action: @escaping () -> Void
+    ) {
         guard let indexes = selectedIndexes(),
               tasks[indexes.task].photos[indexes.photo].hasLocalOverrides else {
             action()
             return
         }
         let name = tasks[indexes.task].photos[indexes.photo].name
-        manualRedetectPrompt = ManualRedetectPrompt(photoName: name, action: action)
+        manualRedetectPrompt = ManualRedetectPrompt(photoName: name, actionTitle: actionTitle, message: message, action: action)
     }
 
     /// Confirm a staged re-detect, discarding the manual corrections.
@@ -746,6 +789,7 @@ final class AppStore: ObservableObject {
     private func updateTaskFromProcessor(taskIndex: Int, photoURL: URL, regions: [CropRegion], candidates: [CropCandidate], outputs: [URL], failed: Bool) {
         guard tasks.indices.contains(taskIndex),
               let photoIndex = tasks[taskIndex].photos.firstIndex(where: { $0.url == photoURL }) else { return }
+        tasks[taskIndex].photos[photoIndex].autoCropRegions = regions
         if !tasks[taskIndex].photos[photoIndex].hasLocalOverrides {
             tasks[taskIndex].photos[photoIndex].cropRegions = regions
         }
@@ -769,8 +813,12 @@ final class AppStore: ObservableObject {
 
     private func updateTaskFromLocator(taskIndex: Int, photoURL: URL, regions: [CropRegion], candidates: [CropCandidate]) {
         guard tasks.indices.contains(taskIndex),
-              let photoIndex = tasks[taskIndex].photos.firstIndex(where: { $0.url == photoURL }),
-              !tasks[taskIndex].photos[photoIndex].hasLocalOverrides else { return }
+              let photoIndex = tasks[taskIndex].photos.firstIndex(where: { $0.url == photoURL }) else { return }
+        tasks[taskIndex].photos[photoIndex].autoCropRegions = regions
+        if tasks[taskIndex].photos[photoIndex].hasLocalOverrides {
+            editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
+            return
+        }
         tasks[taskIndex].photos[photoIndex].cropRegions = regions
         if !candidates.isEmpty {
             tasks[taskIndex].photos[photoIndex].cropCandidates = candidates

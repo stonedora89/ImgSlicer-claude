@@ -173,4 +173,56 @@ struct FilmDeskewValidationTests {
         let remaining = library.load(rootURL: root)
         #expect(remaining.map(\.sourceName) == ["other.jpg"])
     }
+
+    @Test("Manual edits persist both automatic and adjusted regions")
+    func manualEditPersistsAutomaticAndAdjustedRegions() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let photoURL = root.appendingPathComponent("frame.jpg")
+        var photo = PhotoItem(url: photoURL, relativePath: "frame.jpg")
+        let autoRect = CGRect(x: 0.10, y: 0.20, width: 0.30, height: 0.40)
+        let manualRect = CGRect(x: 0.12, y: 0.22, width: 0.26, height: 0.36)
+        photo.autoCropRegions = [
+            CropRegion(index: 1, rect: autoRect, angle: 1.25, isManual: false)
+        ]
+        photo.cropRegions = [
+            CropRegion(index: 1, rect: manualRect, angle: 2.5, isManual: true)
+        ]
+        photo.hasLocalOverrides = true
+
+        let task = FolderTask(
+            rootURL: root,
+            displayName: "test",
+            imageCount: 1,
+            folderCount: 1,
+            photos: [photo]
+        )
+        let store = CropEditStore()
+        store.save(photo: photo, in: task)
+
+        let data = try Data(contentsOf: root.appendingPathComponent(".imgslicer-edits.json"))
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["version"] as? Int == 2)
+        let photos = try #require(object["photos"] as? [String: Any])
+        let saved = try #require(photos["frame.jpg"] as? [String: Any])
+        #expect((saved["autoRegions"] as? [[String: Any]])?.count == 1)
+        #expect((saved["manualRegions"] as? [[String: Any]])?.count == 1)
+        #expect((saved["regions"] as? [[String: Any]])?.count == 1)
+
+        let freshPhoto = PhotoItem(url: photoURL, relativePath: "frame.jpg")
+        let freshTask = FolderTask(
+            rootURL: root,
+            displayName: "test",
+            imageCount: 1,
+            folderCount: 1,
+            photos: [freshPhoto]
+        )
+        let restored = store.restoredTask(freshTask)
+        #expect(restored.photos[0].hasLocalOverrides)
+        #expect(restored.photos[0].cropRegions[0].rect == manualRect)
+        #expect(restored.photos[0].cropRegions[0].angle == 2.5)
+        #expect(restored.photos[0].autoCropRegions[0].rect == autoRect)
+        #expect(restored.photos[0].autoCropRegions[0].angle == 1.25)
+    }
 }

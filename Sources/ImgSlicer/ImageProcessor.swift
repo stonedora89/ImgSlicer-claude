@@ -238,8 +238,14 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
+                let rowSplit = splitStackedContactRows(
+                    regions: split,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
                 let sampleSplit = splitMergedFramesBySample(
-                    split,
+                    rowSplit,
                     sampleProfiles: sampleProfiles,
                     gray: fullGray.bytes,
                     width: fullGray.width,
@@ -257,8 +263,14 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
-                let snapped = snapVerticalBoundaries(
+                let gridSplit = splitWideGridCellsByNarrowPeer(
                     regions: pairSplit,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                let snapped = snapVerticalBoundaries(
+                    regions: gridSplit,
                     gray: fullGray.bytes,
                     width: fullGray.width,
                     height: fullGray.height
@@ -274,19 +286,27 @@ struct ImageProcessor: Sendable {
                     width: fullGray.width,
                     height: fullGray.height
                 )
+                let contentTight = tightenContactSheetContentEdges(
+                    regions: evidenced,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
+                let repairedWidePairs = rebalanceAdjacentRowBoundaries(mergeCollapsedWideEdgePairs(contentTight))
                 // Tilt estimation is the costly part, so only run it for the
                 // top-ranked candidate (the one shown/output by default).
                 let estimateTilt = candidateOffset == 0
+                let tiltedRegions = repairedWidePairs.enumerated().map {
+                    let rect = $0.element.rect.normalized
+                    let angle = (estimateTilt && !$0.element.isManual) ? estimateRegionTilt(
+                        gray: fullGray.bytes, width: fullGray.width, height: fullGray.height, rect: rect
+                    ) : 0
+                    return CropRegion(index: $0.offset + 1, rect: rect, angle: angle, isManual: $0.element.isManual)
+                }
                 return CropCandidate(
                     title: candidate.title,
                     detail: candidate.detail,
-                    regions: evidenced.enumerated().map {
-                        let rect = $0.element.rect.normalized
-                        let angle = (estimateTilt && !$0.element.isManual) ? estimateRegionTilt(
-                            gray: fullGray.bytes, width: fullGray.width, height: fullGray.height, rect: rect
-                        ) : 0
-                        return CropRegion(index: $0.offset + 1, rect: rect, angle: angle, isManual: $0.element.isManual)
-                    },
+                    regions: stabilizeContactSheetTiltAngles(stabilizeStripTiltAngles(tiltedRegions)),
                     marginScale: candidate.marginScale,
                     score: candidate.score
                 )
@@ -301,6 +321,16 @@ struct ImageProcessor: Sendable {
         candidates = candidates.map { candidate in
             let regular = regularizeStripGrid(candidate.regions)
             guard regular.count == candidate.regions.count else { return candidate }
+            let completedStrip = completeSingleRowStripGrid(regular)
+            if completedStrip.map(\.rect) != regular.map(\.rect) {
+                return CropCandidate(
+                    title: candidate.title,
+                    detail: candidate.detail,
+                    regions: completedStrip,
+                    marginScale: candidate.marginScale,
+                    score: min(1, candidate.score + 0.03)
+                )
+            }
             return CropCandidate(
                 title: candidate.title,
                 detail: candidate.detail,
@@ -317,11 +347,12 @@ struct ImageProcessor: Sendable {
             let layoutConfidence = layoutConfidenceScore(candidate.regions)
             guard layoutConfidence >= 0.72 else { return candidate }
             let completed = completeGridLattice(candidate.regions)
-            guard completed.count > candidate.regions.count else { return candidate }
+            let pruned = pruneOverlappingIntermediateRows(completed)
+            guard pruned.map(\.rect) != candidate.regions.map(\.rect) else { return candidate }
             return CropCandidate(
                 title: candidate.title,
                 detail: candidate.detail,
-                regions: completed,
+                regions: pruned,
                 marginScale: candidate.marginScale,
                 score: candidate.score
             )
@@ -638,6 +669,581 @@ struct ImageProcessor: Sendable {
         }
     }
 
+    /// Split a two-row contact-sheet that the detector represented as one tall
+    /// strip of 5–7 columns. This is the no-sample counterpart to
+    /// `splitMergedFramesBySample`: the current image itself tells us the boxes
+    /// are too tall (near full scan height) and aligned in one row, while the
+    /// horizontal film gutter through the middle provides pixel evidence for a
+    /// safe 2-row split.
+    private func splitStackedContactRows(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard (5...7).contains(regions.count),
+              width > 8,
+              height > 8,
+              gray.count >= width * height else { return regions }
+
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let heights = rects.map { Double($0.height) }
+        let medianH = median(heights)
+        guard medianH > 0.68 else { return regions }
+        let tallIndices = heights.indices.filter { heights[$0] >= medianH * 0.72 }
+        guard tallIndices.count >= regions.count - 1 else { return regions }
+
+        let centreYs = tallIndices.map { Double(rects[$0].midY) }
+        let meanY = centreYs.reduce(0, +) / Double(centreYs.count)
+        let stdY = (centreYs.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centreYs.count)).squareRoot()
+        guard stdY < medianH * 0.06 else { return regions }
+
+        let widths = rects.map { Double($0.width) }
+        let medianW = median(widths)
+        guard medianW > 0.08, medianW < 0.23 else { return regions }
+        let unionLeft = rects.map { Double($0.minX) }.min() ?? 0
+        let unionRight = rects.map { Double($0.maxX) }.max() ?? 0
+        guard unionRight - unionLeft > 0.78 else { return regions }
+
+        func centralBlankBand(in rect: CGRect) -> (top: Double, bottom: Double)? {
+            let r = rect.normalized
+            let x0 = max(0, min(width - 1, Int((r.minX + r.width * 0.08) * Double(width))))
+            let x1 = max(x0 + 1, min(width, Int((r.maxX - r.width * 0.08) * Double(width))))
+            let y0 = max(0, min(height - 1, Int(r.minY * Double(height))))
+            let y1 = max(y0 + 1, min(height, Int(r.maxY * Double(height))))
+            guard x1 - x0 > 24, y1 - y0 > 80 else { return nil }
+
+            let searchTop = y0 + Int(Double(y1 - y0) * 0.32)
+            let searchBottom = y0 + Int(Double(y1 - y0) * 0.68)
+            guard searchBottom > searchTop else { return nil }
+            let stepX = max(1, (x1 - x0) / 180)
+
+            func isBlankRow(_ y: Int) -> Bool {
+                var dark = 0
+                var total = 0
+                var sum = 0
+                var x = x0
+                while x < x1 {
+                    let v = Int(gray[y * width + x])
+                    if v <= 64 { dark += 1 }
+                    sum += v
+                    total += 1
+                    x += stepX
+                }
+                guard total > 0 else { return false }
+                let darkRatio = Double(dark) / Double(total)
+                let mean = Double(sum) / Double(total)
+                return darkRatio >= 0.55 && mean <= 92
+            }
+
+            var best: (start: Int, end: Int)? = nil
+            var currentStart: Int? = nil
+            for y in searchTop..<searchBottom {
+                if isBlankRow(y) {
+                    if currentStart == nil { currentStart = y }
+                } else if let start = currentStart {
+                    let end = y
+                    if best == nil || end - start > best!.end - best!.start {
+                        best = (start, end)
+                    }
+                    currentStart = nil
+                }
+            }
+            if let start = currentStart {
+                let end = searchBottom
+                if best == nil || end - start > best!.end - best!.start {
+                    best = (start, end)
+                }
+            }
+
+            guard let band = best else { return nil }
+            let bandHeight = band.end - band.start
+            let totalHeight = y1 - y0
+            guard bandHeight >= max(12, totalHeight / 18) else { return nil }
+            let topHeight = band.start - y0
+            let bottomHeight = y1 - band.end
+            guard topHeight >= totalHeight / 4, bottomHeight >= totalHeight / 4 else { return nil }
+            return (Double(band.start) / Double(height), Double(band.end) / Double(height))
+        }
+
+        let bands = rects.compactMap { centralBlankBand(in: $0) }
+        guard bands.count >= max(4, regions.count - 1) else { return regions }
+        let bandCenters = bands.map { ($0.top + $0.bottom) / 2 }.sorted()
+        let medianCenter = bandCenters[bandCenters.count / 2]
+        let aligned = bands.filter { abs((($0.top + $0.bottom) / 2) - medianCenter) <= 0.035 }
+        guard aligned.count >= max(4, regions.count - 1) else { return regions }
+
+        var output: [CropRegion] = []
+        for region in regions.sorted(by: { $0.rect.minX < $1.rect.minX }) {
+            let r = region.rect.normalized
+            guard let band = centralBlankBand(in: r) else {
+                output.append(region)
+                continue
+            }
+            let top = CGRect(
+                x: Double(r.minX),
+                y: Double(r.minY),
+                width: Double(r.width),
+                height: max(0, band.top - Double(r.minY))
+            ).normalized
+            let bottom = CGRect(
+                x: Double(r.minX),
+                y: band.bottom,
+                width: Double(r.width),
+                height: max(0, Double(r.maxY) - band.bottom)
+            ).normalized
+            guard top.height >= medianH * 0.25, bottom.height >= medianH * 0.25 else {
+                output.append(region)
+                continue
+            }
+            output.append(CropRegion(index: output.count + 1, rect: top, angle: region.angle, isManual: region.isManual))
+            output.append(CropRegion(index: output.count + 1, rect: bottom, angle: region.angle, isManual: region.isManual))
+        }
+
+        guard output.count >= regions.count * 2 - 1 else { return regions }
+        return output.sorted {
+            let a = $0.rect.normalized
+            let b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > medianH * 0.15 { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    /// Split horizontally-merged grid cells using the narrow cells already
+    /// present in the same contact sheet as the size prior. Unlike a fixed 6x2
+    /// assumption, this works row by row: a row can end up with 2, 3, 4, 6, etc.
+    /// depending on which wide boxes actually appear in that row.
+    private func splitWideGridCellsByNarrowPeer(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count >= 3,
+              width > 8,
+              height > 8,
+              gray.count >= width * height else { return regions }
+
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let widths = rects.map { Double($0.width) }.sorted()
+        let narrow = widths.filter { $0 >= 0.08 && $0 <= 0.23 }
+        guard !narrow.isEmpty else { return regions }
+        let baseWidth = median(Array(narrow.prefix(max(1, (narrow.count + 1) / 2))))
+        guard baseWidth >= 0.08, baseWidth <= 0.23 else { return regions }
+
+        let heights = rects.map { Double($0.height) }
+        let medianHeight = median(heights)
+        guard medianHeight > 0.20 else { return regions }
+        let rowTolerance = max(0.045, medianHeight * 0.42)
+
+        let order = regions.indices.sorted {
+            let a = rects[$0], b = rects[$1]
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+
+        var rows: [[Int]] = []
+        for idx in order {
+            if let first = rows.last?.first,
+               abs(Double(rects[idx].midY) - Double(rects[first].midY)) <= rowTolerance {
+                rows[rows.count - 1].append(idx)
+            } else {
+                rows.append([idx])
+            }
+        }
+
+        var output: [CropRegion] = []
+        var changed = false
+
+        func splitTrailingBlankRemainder(region: CropRegion, rect r: CGRect, pieces: Int) -> [CropRegion]? {
+            guard pieces >= 3 else { return nil }
+            let x0 = max(0, min(width - 1, Int(r.minX * Double(width))))
+            let x1 = max(x0 + 1, min(width, Int(r.maxX * Double(width))))
+            let y0 = max(0, min(height - 1, Int(r.minY * Double(height))))
+            let y1 = max(y0 + 1, min(height, Int(r.maxY * Double(height))))
+            guard x1 - x0 > 48, y1 - y0 > 24 else { return nil }
+
+            let yInset = max(2, (y1 - y0) / 8)
+            let yRange = (y0 + yInset)..<max(y0 + yInset + 1, y1 - yInset)
+            let darkMean = 82.0
+            let flatStd = 28.0
+
+            func computeStatsForColumn(_ x: Int) -> (mean: Double, std: Double) {
+                var sum = 0.0, sq = 0.0
+                for y in yRange {
+                    let v = Double(gray[y * width + x])
+                    sum += v
+                    sq += v * v
+                }
+                let n = Double(max(1, yRange.count))
+                let m = sum / n
+                return (m, max(0, sq / n - m * m).squareRoot())
+            }
+            let columnStats = (x0..<x1).map { computeStatsForColumn($0) }
+
+            func statsForColumn(_ x: Int) -> (mean: Double, std: Double) {
+                columnStats[max(0, min(columnStats.count - 1, x - x0))]
+            }
+
+            func contentRatio(_ range: Range<Int>) -> Double {
+                guard !range.isEmpty else { return 0 }
+                var hits = 0
+                for x in range {
+                    let s = statsForColumn(x)
+                    if s.mean > darkMean + 12 || s.std > flatStd + 6 {
+                        hits += 1
+                    }
+                }
+                return Double(hits) / Double(range.count)
+            }
+
+            func blankRatio(_ range: Range<Int>) -> Double {
+                guard !range.isEmpty else { return 0 }
+                var hits = 0
+                for x in range {
+                    let s = statsForColumn(x)
+                    if s.mean <= darkMean, s.std <= flatStd {
+                        hits += 1
+                    }
+                }
+                return Double(hits) / Double(range.count)
+            }
+
+            let expectedFirstWidth = Int((baseWidth * Double(width)).rounded())
+            let target = x0 + expectedFirstWidth
+            let search = max(6, expectedFirstWidth / 5)
+            let side = max(5, expectedFirstWidth / 10)
+            var best: (x: Int, score: Double)?
+
+            for x in max(x0 + side + 1, target - search)..<min(x1 - side - 1, target + search) {
+                let left = max(x0 + 1, x - side)..<max(x0 + 1, x - 1)
+                let right = min(x1 - 1, x + 2)..<min(x1 - 1, x + side + 1)
+                let leftContent = contentRatio(left)
+                let rightBlank = blankRatio(right)
+                let remainder = min(x1 - 1, x + side)..<x1
+                let remainderBlank = blankRatio(remainder)
+                guard leftContent >= 0.35, rightBlank >= 0.65, remainderBlank >= 0.62 else { continue }
+                let s = statsForColumn(x)
+                let boundaryScore = max(0, darkMean - s.mean) / darkMean + max(0, flatStd - s.std) / flatStd
+                let score = leftContent + rightBlank + remainderBlank + boundaryScore
+                if best == nil || score > best!.score {
+                    best = (x, score)
+                }
+            }
+
+            guard let splitX = best?.x else { return nil }
+            let split = Double(splitX) / Double(width)
+            let leftWidth = split - Double(r.minX)
+            let rightWidth = Double(r.maxX) - split
+            guard leftWidth >= baseWidth * 0.72,
+                  leftWidth <= baseWidth * 1.28,
+                  rightWidth >= baseWidth * 1.25 else { return nil }
+
+            let left = CGRect(x: Double(r.minX), y: Double(r.minY), width: leftWidth, height: Double(r.height)).normalized
+            let right = CGRect(x: split, y: Double(r.minY), width: rightWidth, height: Double(r.height)).normalized
+            return [
+                CropRegion(index: output.count + 1, rect: left, angle: region.angle, isManual: region.isManual),
+                CropRegion(index: output.count + 2, rect: right, angle: region.angle, isManual: region.isManual)
+            ]
+        }
+
+        for row in rows {
+            let rowSorted = row.sorted { rects[$0].midX < rects[$1].midX }
+            for idx in rowSorted {
+                let region = regions[idx]
+                let r = rects[idx]
+                let ratio = Double(r.width) / baseWidth
+                let pieces = Int(ratio.rounded())
+                guard pieces >= 2,
+                      pieces <= 4,
+                      Double(r.width) >= baseWidth * 1.55,
+                      ratio >= Double(pieces) * 0.72,
+                      ratio <= Double(pieces) * 1.34 else {
+                    output.append(region)
+                    continue
+                }
+
+                if let split = splitTrailingBlankRemainder(region: region, rect: r, pieces: pieces) {
+                    changed = true
+                    output.append(contentsOf: split)
+                    continue
+                }
+
+                let hasEvidence = hasInternalGutterEvidence(
+                    rect: r,
+                    xPieces: pieces,
+                    yPieces: 1,
+                    gray: gray,
+                    width: width,
+                    height: height
+                )
+                guard hasEvidence else {
+                    output.append(region)
+                    continue
+                }
+
+                changed = true
+                let cellWidth = Double(r.width) / Double(pieces)
+                for piece in 0..<pieces {
+                    let rect = CGRect(
+                        x: Double(r.minX) + Double(piece) * cellWidth,
+                        y: Double(r.minY),
+                        width: cellWidth,
+                        height: Double(r.height)
+                    ).normalized
+                    output.append(CropRegion(index: output.count + 1, rect: rect, angle: region.angle, isManual: region.isManual))
+                }
+            }
+        }
+
+        guard changed, output.count > regions.count else { return regions }
+        return output.sorted {
+            let a = $0.rect.normalized, b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    /// Projection sharpness can be hijacked by a strong local line inside one
+    /// frame (a tree trunk, building edge, or high-contrast subject), especially
+    /// in narrow 6-frame film strips. In those strips most frames share a tiny
+    /// deskew angle; isolated 2–8° estimates are almost always local-content
+    /// false positives. Keep deliberate small angles, but suppress outliers
+    /// before persisting automatic crop metadata.
+    private func stabilizeStripTiltAngles(_ regions: [CropRegion]) -> [CropRegion] {
+        guard (5...8).contains(regions.count) else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        let aspects = rects.map { Double($0.height / max($0.width, 0.001)) }
+        let sortedAspects = aspects.sorted()
+        let medianAspect = sortedAspects[sortedAspects.count / 2]
+        guard medianAspect >= 3.0 else { return regions }
+
+        let centersY = rects.map { Double($0.midY) }
+        let meanY = centersY.reduce(0, +) / Double(centersY.count)
+        let spreadY = (centersY.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centersY.count)).squareRoot()
+        let medianHeight = rects.map { Double($0.height) }.sorted()[rects.count / 2]
+        guard spreadY <= max(0.08, medianHeight * 0.10) else { return regions }
+
+        let smallCount = regions.filter { abs($0.angle) <= 0.75 }.count
+        let mostlySmall = smallCount >= max(3, regions.count - 2)
+
+        return regions.enumerated().map { offset, region in
+            let angle = region.angle
+            let stabilized: Double
+            if abs(angle) >= 3.0 {
+                stabilized = 0
+            } else if mostlySmall, abs(angle) > 1.25 {
+                stabilized = angle.sign == .minus ? -0.5 : 0.5
+            } else {
+                stabilized = angle
+            }
+            return CropRegion(index: offset + 1, rect: region.rect, angle: stabilized, isManual: region.isManual)
+        }
+    }
+
+    /// Contact sheets often contain faces, trees, signs, and window frames that
+    /// are stronger than the film edge itself. A single 4–8° automatic angle in
+    /// an otherwise gently-skewed 12-up sheet is almost always a content edge,
+    /// not real film rotation. Clamp only these extreme outliers; keep ordinary
+    /// ±0.25…1.5° estimates because the user has validated many of them.
+    private func stabilizeContactSheetTiltAngles(_ regions: [CropRegion]) -> [CropRegion] {
+        guard (10...14).contains(regions.count) else { return regions }
+        let smallCount = regions.filter { abs($0.angle) <= 1.5 }.count
+        guard smallCount >= regions.count - 2 else { return regions }
+
+        return regions.enumerated().map { offset, region in
+            let angle = region.angle
+            let stabilized: Double
+            if abs(angle) >= 3.0 {
+                stabilized = angle.sign == .minus ? -0.5 : 0.5
+            } else {
+                stabilized = angle
+            }
+            return CropRegion(index: offset + 1, rect: region.rect, angle: stabilized, isManual: region.isManual)
+        }
+    }
+
+    /// When a wide, mostly-dark cell sits at the edge of a contact sheet, the
+    /// content-edge tightening pass can shrink each half independently and leave
+    /// two short adjacent boxes. If every other box in that row has the normal
+    /// row height, this is not a real split: merge the edge pair back into one
+    /// wide cell and restore the row's normal vertical bounds.
+    private func mergeCollapsedWideEdgePairs(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 8 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+        let medianHeight = median(rects.map { Double($0.height) })
+        guard medianHeight > 0.20 else { return regions }
+        let rowTolerance = max(0.045, medianHeight * 0.42)
+
+        let ordered = regions.indices.sorted {
+            let a = rects[$0], b = rects[$1]
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+
+        var rows: [[Int]] = []
+        for idx in ordered {
+            if let first = rows.last?.first,
+               abs(Double(rects[idx].midY) - Double(rects[first].midY)) <= rowTolerance {
+                rows[rows.count - 1].append(idx)
+            } else {
+                rows.append([idx])
+            }
+        }
+
+        var remove = Set<Int>()
+        var replacements: [(after: Int, region: CropRegion)] = []
+
+        for row in rows {
+            let sorted = row.sorted { rects[$0].midX < rects[$1].midX }
+            guard sorted.count >= 5 else { continue }
+            let rowHeights = sorted.map { Double(rects[$0].height) }
+            let rowMedianHeight = median(rowHeights)
+            let normal = sorted.filter { Double(rects[$0].height) >= rowMedianHeight * 0.82 }
+            guard normal.count >= sorted.count - 2 else { continue }
+
+            let edgePairs = [(sorted[0], sorted[1]), (sorted[sorted.count - 2], sorted[sorted.count - 1])]
+            for (leftIdx, rightIdx) in edgePairs {
+                let left = rects[leftIdx]
+                let right = rects[rightIdx]
+                guard !remove.contains(leftIdx), !remove.contains(rightIdx),
+                      Double(left.height) <= rowMedianHeight * 0.72,
+                      Double(right.height) <= rowMedianHeight * 0.72,
+                      abs(Double(left.minY - right.minY)) <= rowMedianHeight * 0.10,
+                      Double(right.minX - left.maxX) <= max(0.025, Double(left.width) * 0.25) else { continue }
+
+                let reference = normal.map { rects[$0] }
+                let y = median(reference.map { Double($0.minY) })
+                let h = median(reference.map { Double($0.height) })
+                let merged = CGRect(
+                    x: Double(left.minX),
+                    y: y,
+                    width: Double(right.maxX - left.minX),
+                    height: h
+                ).normalized
+                guard merged.width >= Double(left.width + right.width) * 0.88,
+                      merged.height >= rowMedianHeight * 0.82 else { continue }
+                remove.insert(leftIdx)
+                remove.insert(rightIdx)
+                replacements.append((
+                    after: min(leftIdx, rightIdx),
+                    region: CropRegion(index: 0, rect: merged, angle: regions[leftIdx].angle, isManual: regions[leftIdx].isManual)
+                ))
+            }
+        }
+
+        guard !remove.isEmpty else { return regions }
+        var output: [CropRegion] = []
+        for idx in regions.indices {
+            for replacement in replacements where replacement.after == idx {
+                output.append(replacement.region)
+            }
+            if !remove.contains(idx) {
+                output.append(regions[idx])
+            }
+        }
+        return output.sorted {
+            let a = $0.rect.normalized
+            let b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    /// Fix a row where one internal boundary snapped to the wrong visual edge:
+    /// the left cell becomes too narrow and the right neighbour too wide (or the
+    /// reverse), while their combined span still matches two normal cells. In
+    /// that case the row grid is more trustworthy than either local edge.
+    private func rebalanceAdjacentRowBoundaries(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 8 else { return regions }
+        var output = regions
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let heights = rects.map { Double($0.height) }
+        let medianHeight = median(heights)
+        guard medianHeight > 0.20 else { return regions }
+        let rowTolerance = max(0.045, medianHeight * 0.42)
+
+        let ordered = regions.indices.sorted {
+            let a = rects[$0], b = rects[$1]
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+
+        var rows: [[Int]] = []
+        for idx in ordered {
+            if let first = rows.last?.first,
+               abs(Double(rects[idx].midY) - Double(rects[first].midY)) <= rowTolerance {
+                rows[rows.count - 1].append(idx)
+            } else {
+                rows.append([idx])
+            }
+        }
+
+        for row in rows {
+            let sorted = row.sorted { output[$0].rect.normalized.midX < output[$1].rect.normalized.midX }
+            guard sorted.count >= 5 else { continue }
+            let widths = sorted.map { Double(output[$0].rect.normalized.width) }
+            let normalWidths = widths.filter { $0 >= median(widths) * 0.72 && $0 <= median(widths) * 1.28 }
+            guard normalWidths.count >= 3 else { continue }
+            let medianWidth = median(normalWidths)
+            guard medianWidth > 0.06 else { continue }
+
+            for pairOffset in 0..<(sorted.count - 1) {
+                let leftIdx = sorted[pairOffset]
+                let rightIdx = sorted[pairOffset + 1]
+                let left = output[leftIdx].rect.normalized
+                let right = output[rightIdx].rect.normalized
+                let leftWidth = Double(left.width)
+                let rightWidth = Double(right.width)
+                let combined = Double(right.maxX - left.minX)
+                let gap = Double(right.minX - left.maxX)
+                guard abs(gap) <= max(0.008, medianWidth * 0.08),
+                      combined >= medianWidth * 1.70,
+                      combined <= medianWidth * 2.35 else { continue }
+
+                let leftNarrowRightWide = leftWidth < medianWidth * 0.78 && rightWidth > medianWidth * 1.22
+                let leftWideRightNarrow = leftWidth > medianWidth * 1.22 && rightWidth < medianWidth * 0.78
+                guard leftNarrowRightWide || leftWideRightNarrow else { continue }
+
+                let boundary: Double
+                if leftNarrowRightWide {
+                    boundary = min(Double(right.maxX) - medianWidth * 0.72, Double(left.minX) + medianWidth)
+                } else {
+                    boundary = max(Double(left.minX) + medianWidth * 0.72, Double(right.maxX) - medianWidth)
+                }
+                guard boundary > Double(left.minX) + 0.03,
+                      boundary < Double(right.maxX) - 0.03 else { continue }
+
+                let newLeft = CGRect(
+                    x: Double(left.minX),
+                    y: Double(left.minY),
+                    width: boundary - Double(left.minX),
+                    height: Double(left.height)
+                ).normalized
+                let newRight = CGRect(
+                    x: boundary,
+                    y: Double(right.minY),
+                    width: Double(right.maxX) - boundary,
+                    height: Double(right.height)
+                ).normalized
+                output[leftIdx] = CropRegion(index: output[leftIdx].index, rect: newLeft, angle: output[leftIdx].angle, isManual: output[leftIdx].isManual)
+                output[rightIdx] = CropRegion(index: output[rightIdx].index, rect: newRight, angle: output[rightIdx].angle, isManual: output[rightIdx].isManual)
+            }
+        }
+
+        return output.sorted {
+            let a = $0.rect.normalized
+            let b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > rowTolerance { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
     private func splitWidePairByInternalGutter(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
         guard regions.count == 1,
               let region = regions.first,
@@ -743,6 +1349,30 @@ struct ImageProcessor: Sendable {
         let xRange = (x0 + xInset)..<max(x0 + xInset + 1, x1 - xInset)
         let yRange = (y0 + yInset)..<max(y0 + yInset + 1, y1 - yInset)
 
+        func columnHasContent(_ xRange: Range<Int>) -> Bool {
+            guard !xRange.isEmpty else { return false }
+            var hits = 0
+            for x in xRange {
+                let s = statsForColumn(x, yRange: yRange)
+                if s.mean > darkMean + 12 || s.std > flatStd + 6 {
+                    hits += 1
+                }
+            }
+            return Double(hits) / Double(xRange.count) >= 0.28
+        }
+
+        func rowHasContent(_ yRange: Range<Int>) -> Bool {
+            guard !yRange.isEmpty else { return false }
+            var hits = 0
+            for y in yRange {
+                let s = statsForRow(y, xRange: xRange)
+                if s.mean > darkMean + 12 || s.std > flatStd + 6 {
+                    hits += 1
+                }
+            }
+            return Double(hits) / Double(yRange.count) >= 0.28
+        }
+
         if xPieces > 1 {
             for i in 1..<xPieces {
                 let target = x0 + (x1 - x0) * i / xPieces
@@ -751,8 +1381,13 @@ struct ImageProcessor: Sendable {
                 for x in max(x0 + 2, target - win)..<min(x1 - 2, target + win) {
                     let s = statsForColumn(x, yRange: yRange)
                     if s.mean <= darkMean, s.std <= flatStd {
-                        found = true
-                        break
+                        let sideWindow = max(5, min(win, (x1 - x0) / 18))
+                        let left = max(x0 + 1, x - sideWindow)..<max(x0 + 1, x - 1)
+                        let right = min(x1 - 1, x + 2)..<min(x1 - 1, x + sideWindow + 1)
+                        if columnHasContent(left) && columnHasContent(right) {
+                            found = true
+                            break
+                        }
                     }
                 }
                 if !found { return false }
@@ -767,8 +1402,13 @@ struct ImageProcessor: Sendable {
                 for y in max(y0 + 2, target - win)..<min(y1 - 2, target + win) {
                     let s = statsForRow(y, xRange: xRange)
                     if s.mean <= darkMean, s.std <= flatStd {
-                        found = true
-                        break
+                        let sideWindow = max(5, min(win, (y1 - y0) / 18))
+                        let top = max(y0 + 1, y - sideWindow)..<max(y0 + 1, y - 1)
+                        let bottom = min(y1 - 1, y + 2)..<min(y1 - 1, y + sideWindow + 1)
+                        if rowHasContent(top) && rowHasContent(bottom) {
+                            found = true
+                            break
+                        }
                     }
                 }
                 if !found { return false }
@@ -1913,6 +2553,96 @@ struct ImageProcessor: Sendable {
         return output
     }
 
+    /// Complete/regularize a single-row 6-frame film strip when darkness hides
+    /// one or more gutters. This catches two common failures without touching
+    /// contact sheets or intentionally multi-row layouts:
+    /// - 6-frame strip -> 5 boxes because one neighbour pair merged;
+    /// - 6 boxes but the first dark frames drift right/too wide while the right
+    ///   side of the strip is stable.
+    private func completeSingleRowStripGrid(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count == 5 || regions.count == 6 else { return regions }
+        let sorted = regions.map { $0.rect.normalized }.sorted { $0.midX < $1.midX }
+
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let heights = sorted.map { Double($0.height) }
+        guard let hMin = heights.min(), let hMax = heights.max(), hMin > 0, hMax / hMin < 1.18 else { return regions }
+        let medianH = median(heights)
+        guard medianH > 0.55 else { return regions }
+
+        let centreYs = sorted.map { Double($0.midY) }
+        let meanY = centreYs.reduce(0, +) / Double(centreYs.count)
+        let stdY = (centreYs.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centreYs.count)).squareRoot()
+        guard stdY < medianH * 0.04 else { return regions }
+
+        let unionLeft = sorted.map { Double($0.minX) }.min() ?? 0
+        let unionRight = sorted.map { Double($0.maxX) }.max() ?? 0
+        let unionWidth = unionRight - unionLeft
+        guard unionLeft < 0.06, unionRight > 0.94, unionWidth > 0.88 else { return regions }
+
+        let widths = sorted.map { Double($0.width) }
+        let medianW = median(widths)
+        guard medianW > 0.08, medianW < 0.22 else { return regions }
+        let impliedCount = Int((unionWidth / medianW).rounded())
+        let targetCount: Int
+        if regions.count == 5 {
+            guard impliedCount == regions.count + 1, impliedCount == 6 else { return regions }
+            targetCount = 6
+        } else {
+            guard impliedCount == 6 || (unionWidth / 6.0) > medianW * 0.85 else { return regions }
+            targetCount = 6
+        }
+
+        let centres = sorted.map { Double($0.midX) }
+        let gaps = zip(centres.dropFirst(), centres).map { $0 - $1 }
+        guard !gaps.isEmpty else { return regions }
+
+        if regions.count == 5 {
+            // Make sure this is a genuine "one gap is too large / one box too
+            // wide" situation. A normal 5-frame strip should not be expanded to 6.
+            guard let maxGap = gaps.max(), maxGap > median(gaps) * 1.25 else { return regions }
+            guard widths.contains(where: { $0 > medianW * 1.35 }) else { return regions }
+        } else {
+            let xStarts = sorted.map { Double($0.minX) }
+            let startGaps = zip(xStarts.dropFirst(), xStarts).map { $0 - $1 }
+            let medianStartGap = median(startGaps)
+            let irregularStart = sorted[0].minX > 0.02 ||
+                widths.contains(where: { $0 > medianW * 1.14 || $0 < medianW * 0.82 }) ||
+                startGaps.contains(where: { abs($0 - medianStartGap) > medianW * 0.20 })
+            guard irregularStart else { return regions }
+        }
+
+        let pitch = regions.count == 6
+            ? median(zip(sorted.map { Double($0.minX) }.dropFirst(), sorted.map { Double($0.minX) }).map { $0 - $1 })
+            : unionWidth / Double(targetCount)
+        guard pitch > medianW * 0.85, pitch < medianW * 1.35 else { return regions }
+        let targetWidth = min(medianW, pitch * 0.96)
+        let top = median(sorted.map { Double($0.minY) })
+        let bottom = median(sorted.map { Double($0.maxY) })
+        guard bottom - top > 0.5 else { return regions }
+
+        let anchorLeft: Double
+        if regions.count == 6, unionRight > 0.94 {
+            // The right edge is usually easier to see on these aquarium strips;
+            // anchor from it so a missing first-left gutter can still recover.
+            anchorLeft = unionRight - targetWidth - Double(targetCount - 1) * pitch
+        } else {
+            anchorLeft = unionLeft + (pitch - targetWidth) / 2
+        }
+
+        let rebuilt = (0..<targetCount).map { index -> CropRegion in
+            let x = max(0, anchorLeft + Double(index) * pitch)
+            let rect = CGRect(
+                x: x,
+                y: top,
+                width: min(targetWidth, 1 - x),
+                height: min(bottom, 1) - top
+            ).normalized
+            return CropRegion(index: index + 1, rect: rect, angle: 0, isManual: false)
+        }
+        return rebuilt
+    }
+
     /// Fill in grid cells the layout implies but detection missed — e.g. a black
     /// or subject-less frame at the end of a film-strip row that produced no
     /// edges, so no box was ever created for it. Pure geometry: it groups the
@@ -2009,6 +2739,145 @@ struct ImageProcessor: Sendable {
         return merged.enumerated().map {
             CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
         }
+    }
+
+    /// If a weak split produces three overlapping rows out of what is visually
+    /// two rows, discard the thin/intermediate row. Real contact-sheet rows have
+    /// a clear vertical gap; a synthetic middle row overlaps both neighbours.
+    private func pruneOverlappingIntermediateRows(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 12 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+        let medianH = median(rects.map { Double($0.height) })
+        guard medianH > 0 else { return regions }
+        let rowTol = max(0.045, medianH * 0.38)
+
+        let order = regions.indices.sorted { Double(rects[$0].midY) < Double(rects[$1].midY) }
+        var rows: [[Int]] = []
+        for idx in order {
+            if let first = rows.last?.first,
+               abs(Double(rects[idx].midY) - Double(rects[first].midY)) <= rowTol {
+                rows[rows.count - 1].append(idx)
+            } else {
+                rows.append([idx])
+            }
+        }
+        guard rows.count == 3 else { return regions }
+
+        let top = rows[0].map { rects[$0] }
+        let mid = rows[1].map { rects[$0] }
+        let bottom = rows[2].map { rects[$0] }
+        guard top.count >= 4, mid.count >= 4, bottom.count >= 4 else { return regions }
+
+        let topBottom = top.map { Double($0.maxY) }.max() ?? 0
+        let midTop = mid.map { Double($0.minY) }.min() ?? 1
+        let midBottom = mid.map { Double($0.maxY) }.max() ?? 0
+        let bottomTop = bottom.map { Double($0.minY) }.min() ?? 1
+        let overlapsTop = topBottom - midTop > medianH * 0.04
+        let overlapsBottom = midBottom - bottomTop > medianH * 0.04
+        guard overlapsTop && overlapsBottom else { return regions }
+
+        let middle = Set(rows[1])
+        let kept = regions.indices.filter { !middle.contains($0) }.map { regions[$0] }
+        return kept.sorted {
+            let a = $0.rect.normalized, b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > rowTol { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    /// Tighten boxes in a contact sheet so black film borders/gutters are not
+    /// included as crop content. The grid split gives us the right cells; this
+    /// step moves top/bottom edges inward until the sampled row is mostly
+    /// photographic content rather than flat black border.
+    private func tightenContactSheetContentEdges(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count >= 8, width > 8, height > 8, gray.count >= width * height else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        let rowLike = rowsForContactSheet(rects)
+        guard rowLike.count >= 2 || regions.count >= 10 else { return regions }
+
+        func contentRatio(y: Int, x0: Int, x1: Int) -> Double {
+            guard x1 > x0 else { return 0 }
+            let step = max(1, (x1 - x0) / 80)
+            var total = 0
+            var content = 0
+            var x = x0
+            while x < x1 {
+                let v = gray[y * width + x]
+                if v > 34 && v < 244 { content += 1 }
+                total += 1
+                x += step
+            }
+            return Double(content) / Double(max(1, total))
+        }
+
+        func darkRatio(y: Int, x0: Int, x1: Int) -> Double {
+            guard x1 > x0 else { return 0 }
+            let step = max(1, (x1 - x0) / 80)
+            var total = 0
+            var dark = 0
+            var x = x0
+            while x < x1 {
+                if gray[y * width + x] <= 42 { dark += 1 }
+                total += 1
+                x += step
+            }
+            return Double(dark) / Double(max(1, total))
+        }
+
+        return regions.enumerated().map { _, region in
+            let r = region.rect.normalized
+            let x0 = max(0, min(width - 1, Int(r.minX * Double(width))))
+            let x1 = max(x0 + 1, min(width, Int(r.maxX * Double(width))))
+            var y0 = max(0, min(height - 1, Int(r.minY * Double(height))))
+            var y1 = max(y0 + 1, min(height, Int(r.maxY * Double(height))))
+            let originalY0 = y0
+            let originalY1 = y1
+            let span = max(1, y1 - y0)
+            let maxTrim = max(2, Int(Double(span) * 0.10))
+            let minSpan = max(12, Int(Double(span) * 0.72))
+
+            while y0 + minSpan < y1,
+                  y0 - originalY0 < maxTrim,
+                  darkRatio(y: y0, x0: x0, x1: x1) >= 0.72,
+                  contentRatio(y: y0, x0: x0, x1: x1) <= 0.20 {
+                y0 += 1
+            }
+
+            while y0 + minSpan < y1,
+                  originalY1 - y1 < maxTrim,
+                  darkRatio(y: y1 - 1, x0: x0, x1: x1) >= 0.72,
+                  contentRatio(y: y1 - 1, x0: x0, x1: x1) <= 0.20 {
+                y1 -= 1
+            }
+
+            guard y1 > y0 else { return region }
+            let rect = CGRect(
+                x: r.minX,
+                y: Double(y0) / Double(height),
+                width: r.width,
+                height: Double(y1 - y0) / Double(height)
+            ).normalized
+            return CropRegion(index: region.index, rect: rect, angle: region.angle, isManual: region.isManual)
+        }
+    }
+
+    private func rowsForContactSheet(_ rects: [CGRect]) -> [[CGRect]] {
+        guard !rects.isEmpty else { return [] }
+        let heights = rects.map { Double($0.height) }.sorted()
+        let medianH = heights[heights.count / 2]
+        let tolerance = max(0.045, medianH * 0.38)
+        var rows: [[CGRect]] = []
+        for rect in rects.sorted(by: { $0.midY < $1.midY }) {
+            if let first = rows.last?.first, abs(Double(rect.midY) - Double(first.midY)) <= tolerance {
+                rows[rows.count - 1].append(rect)
+            } else {
+                rows.append([rect])
+            }
+        }
+        return rows
     }
 
     /// Per-frame edge reliability in [0,1] for [left, right, top, bottom]: how

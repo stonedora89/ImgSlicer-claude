@@ -13,13 +13,21 @@ struct CropEditStore: Sendable {
             let relativePath = restored.photos[photoIndex].relativePath
             guard let edit = edits.photos[relativePath] else { continue }
             let isManual = edit.hasLocalOverrides ?? false
+            let finalRegions = edit.manualRegions ?? edit.regions
+            let automaticRegions = edit.autoRegions ?? (isManual ? [] : edit.regions)
             // Restoring a photo-level local override must not mark every box as manual.
             // Box-level `isManual` is reserved for an actually hand-picked template/manual box.
-            restored.photos[photoIndex].cropRegions = edit.regions.enumerated().map { offset, rect in
+            restored.photos[photoIndex].cropRegions = finalRegions.enumerated().map { offset, rect in
                 CropRegion(index: offset + 1, rect: rect.cgRect, angle: rect.angle ?? 0, isManual: false)
             }
-            if !isManual {
+            if !automaticRegions.isEmpty {
+                restored.photos[photoIndex].autoCropRegions = automaticRegions.enumerated().map { offset, rect in
+                    CropRegion(index: offset + 1, rect: rect.cgRect, angle: rect.angle ?? 0, isManual: false)
+                }
+            } else if !isManual {
                 restored.photos[photoIndex].autoCropRegions = restored.photos[photoIndex].cropRegions
+            } else {
+                restored.photos[photoIndex].autoCropRegions = []
             }
             restored.photos[photoIndex].hasLocalOverrides = isManual
             restored.photos[photoIndex].status = isManual ? .manual : .located
@@ -32,7 +40,9 @@ struct CropEditStore: Sendable {
         edits.photos[photo.relativePath] = SavedPhotoEdit(
             updatedAt: Date(),
             hasLocalOverrides: photo.hasLocalOverrides,
-            regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
+            regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) },
+            autoRegions: savedAutoRegions(from: photo),
+            manualRegions: photo.hasLocalOverrides ? photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) } : nil
         )
         write(edits: edits, rootURL: task.rootURL)
     }
@@ -44,7 +54,9 @@ struct CropEditStore: Sendable {
             edits.photos[photo.relativePath] = SavedPhotoEdit(
                 updatedAt: now,
                 hasLocalOverrides: photo.hasLocalOverrides,
-                regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
+                regions: photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) },
+                autoRegions: savedAutoRegions(from: photo),
+                manualRegions: photo.hasLocalOverrides ? photo.cropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) } : nil
             )
         }
         write(edits: edits, rootURL: task.rootURL)
@@ -82,29 +94,50 @@ struct CropEditStore: Sendable {
     private func editsURL(rootURL: URL) -> URL {
         rootURL.appendingPathComponent(fileName, isDirectory: false)
     }
+
+    private func savedAutoRegions(from photo: PhotoItem) -> [SavedRect]? {
+        guard !photo.autoCropRegions.isEmpty else { return nil }
+        return photo.autoCropRegions.map { SavedRect(rect: $0.rect, angle: $0.angle) }
+    }
 }
 
 private struct SavedCropEdits: Codable {
-    var version: Int = 1
+    var version: Int = 2
     var photos: [String: SavedPhotoEdit] = [:]
 }
 
 private struct SavedPhotoEdit: Codable {
     var updatedAt: Date
     var hasLocalOverrides: Bool?
+    /// Backward-compatible current/final regions. For manual photos this is the
+    /// manual result used for cropping; for automatic photos it equals autoRegions.
     var regions: [SavedRect]
+    /// Raw automatic recognition result preserved for later comparison.
+    var autoRegions: [SavedRect]?
+    /// User-adjusted result. Cropping/export uses this when hasLocalOverrides is true.
+    var manualRegions: [SavedRect]?
 
     enum CodingKeys: String, CodingKey {
         case updatedAt
         case hasLocalOverrides
         case isManual
         case regions
+        case autoRegions
+        case manualRegions
     }
 
-    init(updatedAt: Date, hasLocalOverrides: Bool?, regions: [SavedRect]) {
+    init(
+        updatedAt: Date,
+        hasLocalOverrides: Bool?,
+        regions: [SavedRect],
+        autoRegions: [SavedRect]?,
+        manualRegions: [SavedRect]?
+    ) {
         self.updatedAt = updatedAt
         self.hasLocalOverrides = hasLocalOverrides
         self.regions = regions
+        self.autoRegions = autoRegions
+        self.manualRegions = manualRegions
     }
 
     init(from decoder: Decoder) throws {
@@ -113,6 +146,8 @@ private struct SavedPhotoEdit: Codable {
         hasLocalOverrides = try container.decodeIfPresent(Bool.self, forKey: .hasLocalOverrides)
             ?? container.decodeIfPresent(Bool.self, forKey: .isManual)
         regions = try container.decode([SavedRect].self, forKey: .regions)
+        autoRegions = try container.decodeIfPresent([SavedRect].self, forKey: .autoRegions)
+        manualRegions = try container.decodeIfPresent([SavedRect].self, forKey: .manualRegions)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -120,6 +155,8 @@ private struct SavedPhotoEdit: Codable {
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(hasLocalOverrides, forKey: .hasLocalOverrides)
         try container.encode(regions, forKey: .regions)
+        try container.encodeIfPresent(autoRegions, forKey: .autoRegions)
+        try container.encodeIfPresent(manualRegions, forKey: .manualRegions)
     }
 }
 
