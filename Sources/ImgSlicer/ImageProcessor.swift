@@ -190,6 +190,8 @@ struct ImageProcessor: Sendable {
                     regions = detectWithExternalDetector(imageURL: url, imageWidth: cgImage.width, imageHeight: cgImage.height, settings: settings)
                 case .darkGutters:
                     regions = detectByDarkGutters(luminances: luminances(), width: width, height: height, settings: settings)
+                case .adaptiveGutters:
+                    regions = detectByAdaptiveGutters(gray: gray, width: width, height: height, settings: settings)
                 }
 
                 let refinedRegions = trimWhiteEdges(
@@ -2279,6 +2281,241 @@ struct ImageProcessor: Sendable {
         let parent = relativeParent == "." ? outputRoot : outputRoot.appendingPathComponent(relativeParent, isDirectory: true)
         let stem = photo.url.deletingPathExtension().lastPathComponent
         return parent.appendingPathComponent("\(stem)_slice_\(String(format: "%02d", sliceIndex)).jpg")
+    }
+
+    // MARK: - Adaptive Gutter Detection
+
+    /// Detect film strip frames by combining per-column darkness with variance.
+    /// Gutters score highest when they are both dark AND flat (low std dev) —
+    /// discriminating them from dark-but-textured photographic content without
+    /// any manually-tuned sensitivity threshold.
+    private func detectByAdaptiveGutters(gray: [UInt8], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {
+        let rows = detectProjectionRows(gray: gray, width: width, height: height)
+        guard !rows.isEmpty else { return [] }
+
+        var boxes: [IntBox] = []
+        for row in rows {
+            let cols = gutterPeakColumns(gray: gray, width: width, row: row)
+            for col in cols {
+                let box = IntBox(left: col.start, top: row.start, right: col.end, bottom: row.end)
+                    .clamped(width: width, height: height)
+                if box.isValid { boxes.append(box) }
+            }
+        }
+        guard boxes.count >= 2 else { return [] }
+
+        let ordered = orderBoxes(boxes, imageWidth: width, imageHeight: height)
+        let trimmed = ordered
+            .map { trimUniformBlackEdges(gray: gray, width: width, height: height, box: $0) }
+            .filter(\.isValid)
+        guard !trimmed.isEmpty else { return [] }
+
+        let rects = trimmed.map { box in
+            CGRect(
+                x: Double(box.left) / Double(width),
+                y: Double(box.top) / Double(height),
+                width: Double(box.width) / Double(width),
+                height: Double(box.height) / Double(height)
+            ).normalized
+        }
+        return indexedRegions(from: mergeNormalizedRects(rects, overlapThreshold: 0.5), settings: settings)
+    }
+
+    /// Find frame column segments within a single film strip row.
+    /// Gutter positions are the peaks in a variance-weighted darkness profile:
+    /// columns that score high when they are simultaneously dark (film base) and
+    /// uniform (low std dev). This is self-calibrating — no absolute darkness
+    /// threshold needs tuning, only a relative peak in the score profile matters.
+    private func gutterPeakColumns(gray: [UInt8], width: Int, row: IntSegment) -> [IntSegment] {
+        let rowH = row.size
+        guard rowH >= 8, width >= 20 else { return [] }
+
+        // Sprocket holes sit at the very top and bottom of the film strip.
+        // Exclude the outer 15 % on each side for variance computation so that
+        // those bright holes don't inflate std-dev at otherwise-flat gutter columns.
+        let inset = max(1, rowH * 15 / 100)
+        let innerStart = row.start + inset
+        let innerEnd   = row.end   - inset
+        let innerH = max(1, innerEnd - innerStart)
+
+        // Divide the row into horizontal slices and compute darkness per column
+        // per slice. Using the median across slices makes the profile robust to
+        // any remaining bright artefacts that survive the inset.
+        let sliceCount = min(9, max(3, innerH / 10))
+        var sliceDark = [[Double]](
+            repeating: [Double](repeating: 0, count: width),
+            count: sliceCount
+        )
+        for s in 0..<sliceCount {
+            let y0 = innerStart + innerH * s / sliceCount
+            let y1 = innerStart + innerH * (s + 1) / sliceCount
+            guard y1 > y0 else { continue }
+            let sliceH = Double(y1 - y0)
+            for x in 0..<width {
+                var dark = 0
+                for y in y0..<y1 where gray[y * width + x] <= 60 { dark += 1 }
+                sliceDark[s][x] = Double(dark) / sliceH
+            }
+        }
+
+        var medDark = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            let vals = sliceDark.map { $0[x] }.sorted()
+            medDark[x] = vals[vals.count / 2]
+        }
+
+        // Column std dev measured on the INNER band (sprocket-hole-free zone).
+        // Gutters: film base is nearly uniform dark (std < 15).
+        // Dark content: photographic grain and detail push std to 30–70.
+        var colStd = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var sum = 0.0, sumSq = 0.0
+            for y in innerStart..<innerEnd {
+                let v = Double(gray[y * width + x])
+                sum += v
+                sumSq += v * v
+            }
+            let n = Double(innerH)
+            let mean = sum / n
+            colStd[x] = max(0, sumSq / n - mean * mean).squareRoot()
+        }
+
+        // Gutter score: high when dark AND flat (low std).
+        // stdRef ≈ 40: separates flat film-base (std < 12) from textured content.
+        let stdRef = 40.0
+        var score = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            let flatness = max(0.0, 1.0 - colStd[x] / stdRef)
+            score[x] = medDark[x] * flatness
+        }
+
+        // Light smoothing only — gutter peaks are already narrow (2–6 px at 600px
+        // analysis width) so a wide window erases the signal.
+        score = movingAverage(score, window: max(2, width / 200))
+
+        // Find local maxima: each gutter appears as a peak in the score profile.
+        let hw = max(4, width / 80)
+        let minScore = 0.30
+        var rawPeaks: [Int] = []
+        for x in hw..<(width - hw) {
+            guard score[x] >= minScore else { continue }
+            var isMax = true
+            for dx in -hw...hw where dx != 0 {
+                if score[x + dx] > score[x] { isMax = false; break }
+            }
+            if isMax { rawPeaks.append(x) }
+        }
+        guard !rawPeaks.isEmpty else { return [] }
+
+        // Merge peaks within 2×hw (same gutter, different local maxima).
+        var peaks: [Int] = []
+        for p in rawPeaks {
+            if let last = peaks.last, p - last <= hw * 2 {
+                if score[p] > score[last] { peaks[peaks.count - 1] = p }
+            } else {
+                peaks.append(p)
+            }
+        }
+
+        // Regularize: enforce the pitch consistency of a film strip, fill in
+        // any gutters the peak finder missed, remove false close peaks.
+        let regularPeaks = regularizeGutterPeaks(peaks, width: width, score: score, hw: hw)
+        guard !regularPeaks.isEmpty else { return [] }
+
+        // Separate outer-edge gutters (film border) from inter-frame gutters.
+        // Outer borders are cleaned up later by trimUniformBlackEdges; here we
+        // only need the content extent and interior separator positions.
+        let edgeThresh = max(12, width / 25)
+        var outerLeft = 0
+        var outerRight = width
+        var interior: [Int] = []
+        for p in regularPeaks {
+            if p <= edgeThresh {
+                outerLeft = max(outerLeft, p)
+            } else if p >= width - edgeThresh {
+                outerRight = min(outerRight, p)
+            } else {
+                interior.append(p)
+            }
+        }
+
+        let boundaries = [outerLeft] + interior + [outerRight]
+        let minFrameW = max(20, width / 15)
+        var columns: [IntSegment] = []
+        for i in 0..<(boundaries.count - 1) {
+            let l = boundaries[i], r = boundaries[i + 1]
+            guard r - l >= minFrameW else { continue }
+            columns.append(IntSegment(start: l, end: r))
+        }
+        guard columns.count >= 2 else { return [] }
+
+        // Reject obvious false positives: a real film strip has frames of
+        // roughly equal width. If the narrowest column is less than 35 % of
+        // the widest one, the "gutter" is almost certainly the inner edge of the
+        // film border (which sits outside the edge-threshold) rather than an
+        // inter-frame separator. This only applies to small column counts (≤3)
+        // where a single misplaced peak can dominate; wider grids self-correct
+        // through the regularizer.
+        if columns.count <= 3 {
+            let widths = columns.map { Double($0.size) }
+            let minW = widths.min() ?? 0
+            let maxW = widths.max() ?? 1
+            if maxW > 0, minW / maxW < 0.35 { return [] }
+        }
+        return columns
+    }
+
+    /// Regularize gutter peak positions using the median inter-peak pitch.
+    /// Removes false double-peaks (two detections of the same gutter), fills in
+    /// gutters the peak finder missed (gap ≈ 2× pitch), and bails out if the
+    /// spacing is too irregular to trust the grid model.
+    private func regularizeGutterPeaks(_ peaks: [Int], width: Int, score: [Double], hw: Int) -> [Int] {
+        guard peaks.count >= 2 else { return peaks }
+
+        let pitches = zip(peaks.dropFirst(), peaks).map { $0 - $1 }
+        let sortedP = pitches.sorted()
+        let medPitch = sortedP[sortedP.count / 2]
+        guard medPitch >= max(18, width / 20) else { return peaks }
+
+        // Remove double-detections: if two peaks are within 40 % of the pitch,
+        // keep the one with the higher score.
+        var cleaned: [Int] = []
+        for p in peaks {
+            if let last = cleaned.last, p - last < Int(Double(medPitch) * 0.40) {
+                if score[p] > score[last] { cleaned[cleaned.count - 1] = p }
+            } else {
+                cleaned.append(p)
+            }
+        }
+        guard cleaned.count >= 2 else { return cleaned }
+
+        let cp = zip(cleaned.dropFirst(), cleaned).map { $0 - $1 }.sorted()
+        let pitch = cp[cp.count / 2]
+        guard pitch >= max(18, width / 20) else { return cleaned }
+
+        // Only regularize when the spacing is already fairly consistent
+        // (spread < 70 %). Very irregular spacing means the image isn't a
+        // uniform film strip and grid assumptions don't apply.
+        let spread = Double(cp.last! - cp.first!) / Double(pitch)
+        guard spread < 0.70 else { return cleaned }
+
+        // Fill in a single missing gutter when a gap is ≈ 2× the pitch.
+        var filled = [cleaned[0]]
+        for i in 1..<cleaned.count {
+            let prev = cleaned[i - 1], curr = cleaned[i]
+            let gap = curr - prev
+            if gap >= Int(Double(pitch) * 1.55), gap <= Int(Double(pitch) * 2.55) {
+                let predicted = prev + gap / 2
+                let lo = max(hw, predicted - hw * 2)
+                let hi = min(width - hw - 1, predicted + hw * 2)
+                if lo <= hi {
+                    let best = (lo...hi).max(by: { score[$0] < score[$1] }) ?? predicted
+                    filled.append(best)
+                }
+            }
+            filled.append(curr)
+        }
+        return filled
     }
 
     private func detectByProjectionSeparators(gray: [UInt8], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {

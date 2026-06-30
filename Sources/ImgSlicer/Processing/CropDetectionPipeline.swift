@@ -8,6 +8,7 @@ enum CropDetectionStage: Sendable {
     case localContrastComponents
     case externalDetector
     case darkGutters
+    case adaptiveGutters
 
     var displayName: String {
         switch self {
@@ -25,6 +26,8 @@ enum CropDetectionStage: Sendable {
             return "智能识别"
         case .darkGutters:
             return "暗区网格"
+        case .adaptiveGutters:
+            return "纹理识别"
         }
     }
 }
@@ -52,11 +55,11 @@ struct CropDetectionPipeline: Sendable {
         let automaticStages: [CropDetectionStage]
         switch settings.businessProfile {
         case .filmScan:
-            automaticStages = [.projectionSeparators, .darkGutters, .filmFrames, .localContrastComponents, .visionRectangles, .foregroundComponents]
+            automaticStages = [.adaptiveGutters, .projectionSeparators, .darkGutters, .filmFrames, .localContrastComponents, .visionRectangles, .foregroundComponents]
         case .gridPhoto:
-            automaticStages = [.projectionSeparators, .darkGutters, .localContrastComponents, .foregroundComponents, .visionRectangles, .filmFrames]
+            automaticStages = [.adaptiveGutters, .projectionSeparators, .darkGutters, .localContrastComponents, .foregroundComponents, .visionRectangles, .filmFrames]
         case .balanced:
-            automaticStages = [.filmFrames, .projectionSeparators, .darkGutters, .localContrastComponents, .visionRectangles, .foregroundComponents]
+            automaticStages = [.adaptiveGutters, .filmFrames, .projectionSeparators, .darkGutters, .localContrastComponents, .visionRectangles, .foregroundComponents]
         }
 
         guard let selectedStage = settings.algorithmMode.stage else {
@@ -74,6 +77,8 @@ private extension CropAlgorithmMode {
         switch self {
         case .automatic:
             return nil
+        case .adaptiveGutters:
+            return .adaptiveGutters
         case .projectionSeparators:
             return .projectionSeparators
         case .filmFrames:

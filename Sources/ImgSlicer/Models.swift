@@ -46,6 +46,7 @@ enum ImagePreprocessMode: String, CaseIterable, Identifiable, Sendable {
 
 enum CropAlgorithmMode: String, CaseIterable, Identifiable, Sendable {
     case automatic = "自动"
+    case adaptiveGutters = "纹理识别"
     case projectionSeparators = "分隔线"
     case filmFrames = "胶片框"
     case visionRectangles = "矩形"
