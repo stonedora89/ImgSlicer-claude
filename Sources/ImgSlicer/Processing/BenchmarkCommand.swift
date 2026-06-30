@@ -15,6 +15,7 @@ struct BenchmarkCommand: Sendable {
     let passThreshold: Double
     let useSamples: Bool
     let dumpJSONPath: String?
+    let labelsURL: URL?
 
     static func parse(arguments: [String]) -> BenchmarkCommand? {
         guard let commandIndex = arguments.firstIndex(of: "--benchmark") else { return nil }
@@ -43,12 +44,19 @@ struct BenchmarkCommand: Sendable {
             dumpJSONPath = arguments[dumpIndex + 1]
         }
 
+        var labelsURL: URL?
+        if let labelsIndex = arguments.firstIndex(of: "--labels"),
+           arguments.indices.contains(labelsIndex + 1) {
+            labelsURL = URL(fileURLWithPath: arguments[labelsIndex + 1]).standardizedFileURL
+        }
+
         return BenchmarkCommand(
             folderURL: URL(fileURLWithPath: arguments[commandIndex + 1]).standardizedFileURL,
             settings: settings,
             passThreshold: threshold,
             useSamples: arguments.contains("--use-samples"),
-            dumpJSONPath: dumpJSONPath
+            dumpJSONPath: dumpJSONPath,
+            labelsURL: labelsURL
         )
     }
 
@@ -170,6 +178,24 @@ struct BenchmarkCommand: Sendable {
     }
 
     private func loadLabels() -> [String: [CGRect]]? {
+        // A fixed external ground-truth file (--labels) takes precedence over the
+        // app's `.imgslicer-edits.json`. The app rewrites the edits file as the
+        // user works (and can lose manual corrections), so a versioned snapshot
+        // gives a stable, reproducible benchmark — essential when comparing two
+        // algorithm variants. Format: { "rel/path.tif": [{x,y,width,height}, …] }.
+        if let labelsURL {
+            guard let data = try? Data(contentsOf: labelsURL),
+                  let raw = try? JSONDecoder().decode([String: [SavedRect]].self, from: data) else {
+                print("Could not read labels file: \(labelsURL.path)")
+                return nil
+            }
+            var labels: [String: [CGRect]] = [:]
+            for (path, rects) in raw {
+                labels[path] = rects.map { CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
+            }
+            return labels
+        }
+
         let url = folderURL.appendingPathComponent(".imgslicer-edits.json", isDirectory: false)
         guard let data = try? Data(contentsOf: url),
               let edits = try? JSONDecoder().decode(SavedEdits.self, from: data) else {
