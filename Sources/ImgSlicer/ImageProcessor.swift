@@ -334,6 +334,23 @@ struct ImageProcessor: Sendable {
             )
         }
 
+        // Split cross-column frames: a row missing a weak gutter merged two
+        // frames into one; a fully-populated peer row proves the column count
+        // and pins the boundary to cut it at. The split-direction counterpart to
+        // the fragment merge above — together they reconcile a row's frame count
+        // to the lattice without any brightness threshold.
+        candidates = candidates.map { candidate in
+            let split = splitCrossColumnFrames(candidate.regions)
+            guard split.count != candidate.regions.count else { return candidate }
+            return CropCandidate(
+                title: candidate.title,
+                detail: candidate.detail,
+                regions: split,
+                marginScale: candidate.marginScale,
+                score: candidate.score
+            )
+        }
+
         // Regularize the strip grid: a roll's frames share one pitch and width,
         // so a frame that breaks the rhythm (one the snap couldn't fix because
         // its gutter was missing/weak) is pulled back onto the regular grid the
@@ -1599,6 +1616,86 @@ struct ImageProcessor: Sendable {
         }
 
         guard changed, output.count < regions.count else { return regions }
+        return output.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
+        }
+    }
+
+    /// Split a frame that spans multiple grid columns, using a fully-populated
+    /// row as the column reference.
+    ///
+    /// A contact sheet's rows share one column lattice. When one row is complete
+    /// (6 evenly-spaced frames) it pins the column centres; a frame in another
+    /// row whose width covers two of those columns is a pair the detector failed
+    /// to separate (its inter-frame gutter was too weak). We cut it at the column
+    /// boundaries the rich row defines — pure cross-row geometry, no gutter test.
+    ///
+    /// This is the safe direction of the split/merge ambiguity: it only fires
+    /// when another row proves the column count, so a genuinely wide single frame
+    /// (whose row has no fuller peer) is never split.
+    private func splitCrossColumnFrames(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 6 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let medianH = median(rects.map { Double($0.height) })
+        let rowTol = max(0.04, medianH * 0.4)
+        let order = regions.indices.sorted { Double(rects[$0].midY) < Double(rects[$1].midY) }
+        var rows: [[Int]] = []
+        for i in order {
+            if let ref = rows.last?.first, abs(Double(rects[i].midY) - Double(rects[ref].midY)) <= rowTol {
+                rows[rows.count - 1].append(i)
+            } else {
+                rows.append([i])
+            }
+        }
+        guard rows.count >= 2 else { return regions }
+
+        let medianW = median(rects.map { Double($0.width) })
+        guard medianW > 0.02 else { return regions }
+
+        // The fullest row defines the column lattice; it must be evenly spaced.
+        guard let richest = rows.max(by: { $0.count < $1.count }), richest.count >= 3 else { return regions }
+        let centres = richest.map { Double(rects[$0].midX) }.sorted()
+        let gaps = zip(centres.dropFirst(), centres).map { $0 - $1 }
+        guard !gaps.isEmpty else { return regions }
+        let pitch = median(gaps)
+        guard pitch > medianW * 0.85, pitch < medianW * 1.8 else { return regions }
+        guard gaps.allSatisfy({ $0 > pitch * 0.8 && $0 < pitch * 1.2 }) else { return regions }
+        let originX = centres.first!
+        let columnCount = richest.count
+        func columnCentre(_ c: Int) -> Double { originX + Double(c) * pitch }
+        func columnOf(_ x: Double) -> Int { Int(((x - originX) / pitch).rounded()) }
+
+        var output: [CropRegion] = []
+        var changed = false
+        for row in rows {
+            for idx in row.sorted(by: { Double(rects[$0].midX) < Double(rects[$1].midX) }) {
+                let r = rects[idx]
+                // Inset 15% so a frame's own edges don't bleed into a neighbour
+                // column when classifying which columns it covers.
+                let c0 = columnOf(Double(r.minX) + Double(r.width) * 0.15)
+                let c1 = columnOf(Double(r.maxX) - Double(r.width) * 0.15)
+                let span = c1 - c0 + 1
+                guard span >= 2, span <= columnCount,
+                      Double(r.width) >= pitch * (Double(span) - 0.5),
+                      Double(r.width) <= pitch * (Double(span) + 0.4) else {
+                    output.append(regions[idx])
+                    continue
+                }
+                for k in 0..<span {
+                    let c = c0 + k
+                    let left = k > 0 ? columnCentre(c) - pitch / 2 : Double(r.minX)
+                    let right = k < span - 1 ? columnCentre(c) + pitch / 2 : Double(r.maxX)
+                    guard right - left > 0.02 else { continue }
+                    let rect = CGRect(x: left, y: Double(r.minY), width: right - left, height: Double(r.height)).normalized
+                    output.append(CropRegion(index: 0, rect: rect, angle: regions[idx].angle, isManual: regions[idx].isManual))
+                }
+                changed = true
+            }
+        }
+
+        guard changed, output.count > regions.count else { return regions }
         return output.enumerated().map {
             CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
         }
