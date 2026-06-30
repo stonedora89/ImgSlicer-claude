@@ -14,6 +14,7 @@ struct BenchmarkCommand: Sendable {
     let settings: CropSettings
     let passThreshold: Double
     let useSamples: Bool
+    let dumpJSONPath: String?
 
     static func parse(arguments: [String]) -> BenchmarkCommand? {
         guard let commandIndex = arguments.firstIndex(of: "--benchmark") else { return nil }
@@ -36,11 +37,18 @@ struct BenchmarkCommand: Sendable {
             threshold = value
         }
 
+        var dumpJSONPath: String?
+        if let dumpIndex = arguments.firstIndex(of: "--dump-json"),
+           arguments.indices.contains(dumpIndex + 1) {
+            dumpJSONPath = arguments[dumpIndex + 1]
+        }
+
         return BenchmarkCommand(
             folderURL: URL(fileURLWithPath: arguments[commandIndex + 1]).standardizedFileURL,
             settings: settings,
             passThreshold: threshold,
-            useSamples: arguments.contains("--use-samples")
+            useSamples: arguments.contains("--use-samples"),
+            dumpJSONPath: dumpJSONPath
         )
     }
 
@@ -70,7 +78,27 @@ struct BenchmarkCommand: Sendable {
             return
         }
 
+        if let dumpPath = dumpJSONPath {
+            dumpJSON(rows: rows, to: dumpPath)
+        }
         report(rows: rows)
+    }
+
+    /// Write per-image detected and ground-truth boxes (normalized) to JSON so a
+    /// diagnostic script can overlay them on the scan. Pure tooling — lets us see
+    /// WHERE a count mismatch happens (which frame was dropped/merged) instead of
+    /// guessing from the aggregate score.
+    private func dumpJSON(rows: [Row], to path: String) {
+        func encode(_ rects: [CGRect]) -> [[String: Double]] {
+            rects.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] }
+        }
+        var payload: [String: [String: [[String: Double]]]] = [:]
+        for row in rows {
+            payload[row.name] = ["detected": encode(row.detected), "truth": encode(row.truth)]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        print("Dumped boxes to \(path)")
     }
 
     private func report(rows: [Row]) {
