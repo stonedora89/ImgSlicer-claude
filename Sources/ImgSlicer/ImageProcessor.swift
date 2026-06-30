@@ -316,6 +316,24 @@ struct ImageProcessor: Sendable {
         }
 
 
+        // Merge sub-pitch fragments: dark frames (an aquarium, a night scene)
+        // can be over-split into slivers far narrower than the roll's pitch. A
+        // real frame is never a fraction of the pitch, so adjacent slivers that
+        // sum back to one pitch are a single frame the detector shattered.
+        // Pure geometry (no gutter test), so it fixes over-splits that no
+        // brightness threshold could — the inverse of a missed gutter.
+        candidates = candidates.map { candidate in
+            let merged = mergeSubPitchFragments(candidate.regions)
+            guard merged.count != candidate.regions.count else { return candidate }
+            return CropCandidate(
+                title: candidate.title,
+                detail: candidate.detail,
+                regions: merged,
+                marginScale: candidate.marginScale,
+                score: candidate.score
+            )
+        }
+
         // Regularize the strip grid: a roll's frames share one pitch and width,
         // so a frame that breaks the rhythm (one the snap couldn't fix because
         // its gutter was missing/weak) is pulled back onto the regular grid the
@@ -1504,6 +1522,86 @@ struct ImageProcessor: Sendable {
         let edgeScore = min(1, edge / 18)
         let toneScore = min(1, midtoneRatio / 0.22)
         return textureScore * 0.42 + edgeScore * 0.34 + toneScore * 0.24
+    }
+
+    /// Merge adjacent sub-pitch fragments back into single frames.
+    ///
+    /// When a dark frame (an aquarium, a night scene) gets over-split, the
+    /// pieces are far narrower than the roll's pitch. A real frame is never a
+    /// fraction of the pitch, so within a row we greedily fuse a narrow sliver
+    /// with its neighbours until the fused span ≈ one pitch. This is the
+    /// geometric inverse of a missed gutter: it needs no brightness/gutter test,
+    /// so it repairs over-splits that a darker/brighter threshold never could.
+    ///
+    /// Gated to film-strip layouts: enough frames, and a clear dominant pitch
+    /// (most frames already agree on one width). Only fuses when the result
+    /// lands inside the pitch band, so a genuinely narrow frame is left alone.
+    private func mergeSubPitchFragments(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 6 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let widths = rects.map { Double($0.width) }
+        let medianW = median(widths)
+        guard medianW > 0.03 else { return regions }
+        // Require a clear dominant pitch: most frames already share one width.
+        let consistent = widths.filter { $0 >= medianW * 0.78 && $0 <= medianW * 1.25 }.count
+        guard consistent >= (regions.count * 6) / 10 else { return regions }
+
+        let medianH = median(rects.map { Double($0.height) })
+        let rowTol = max(0.04, medianH * 0.4)
+        let order = regions.indices.sorted { Double(rects[$0].midY) < Double(rects[$1].midY) }
+        var rows: [[Int]] = []
+        for i in order {
+            if let ref = rows.last?.first, abs(Double(rects[i].midY) - Double(rects[ref].midY)) <= rowTol {
+                rows[rows.count - 1].append(i)
+            } else {
+                rows.append([i])
+            }
+        }
+
+        var output: [CropRegion] = []
+        var changed = false
+        for row in rows {
+            let sorted = row.sorted { Double(rects[$0].midX) < Double(rects[$1].midX) }
+            var i = 0
+            while i < sorted.count {
+                let idx = sorted[i]
+                let w = Double(rects[idx].width)
+                guard w < medianW * 0.62 else { output.append(regions[idx]); i += 1; continue }
+
+                // Narrow sliver: greedily fuse rightward until ≈ one pitch.
+                var j = i
+                var span = w
+                while j + 1 < sorted.count {
+                    let nextIdx = sorted[j + 1]
+                    let combined = Double(rects[nextIdx].maxX) - Double(rects[idx].minX)
+                    guard span < medianW * 0.78, combined <= medianW * 1.25 else { break }
+                    span = combined
+                    j += 1
+                }
+
+                if j > i, span >= medianW * 0.78, span <= medianW * 1.25 {
+                    let block = (i...j).map { rects[sorted[$0]] }
+                    let minX = block.map { Double($0.minX) }.min() ?? 0
+                    let maxX = block.map { Double($0.maxX) }.max() ?? 0
+                    let minY = block.map { Double($0.minY) }.min() ?? 0
+                    let maxY = block.map { Double($0.maxY) }.max() ?? 0
+                    let rect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).normalized
+                    output.append(CropRegion(index: 0, rect: rect, angle: regions[idx].angle, isManual: regions[idx].isManual))
+                    changed = true
+                    i = j + 1
+                } else {
+                    output.append(regions[idx])
+                    i += 1
+                }
+            }
+        }
+
+        guard changed, output.count < regions.count else { return regions }
+        return output.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
+        }
     }
 
     /// Foreground/component detectors can split one ordinary photo into several
