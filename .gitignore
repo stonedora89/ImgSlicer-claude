@@ -31,6 +31,13 @@ ImgSlicer_Output/
 
 # Local/user-provided photo folders
 imgs/
+分割测试/
+
+# ML pipeline: generated dataset and trained weights (code is tracked, data isn't)
+ml/data/
+ml/*.pt
+ml/*.mlpackage
+ml/*.mlmodel
 
 # Product notes, mockups, and local experiments
 algorithm-comparison.md
