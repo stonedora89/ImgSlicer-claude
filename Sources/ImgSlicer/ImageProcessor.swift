@@ -1074,6 +1074,10 @@ struct ImageProcessor: Sendable {
         return regions.enumerated().map { offset, region in
             let angle = region.angle
             let stabilized: Double
+            // A large automatic angle is almost always a strong content edge
+            // (tree, railing, window) mistaken for rotation, not real film tilt,
+            // which is gentle. Clamp ≥3°; ease a lone mid tilt to ±0.5 when the
+            // rest of the strip is clearly flat.
             if abs(angle) >= 3.0 {
                 stabilized = 0
             } else if mostlySmall, abs(angle) > 1.25 {
@@ -1097,6 +1101,8 @@ struct ImageProcessor: Sendable {
 
         return regions.enumerated().map { offset, region in
             let angle = region.angle
+            // Ease extreme outliers (≥3°, a face/tree/window edge mistaken for
+            // rotation) to a token ±0.5; keep the gentle real tilts below that.
             let stabilized: Double
             if abs(angle) >= 3.0 {
                 stabilized = angle.sign == .minus ? -0.5 : 0.5
@@ -2519,8 +2525,14 @@ struct ImageProcessor: Sendable {
             }
             a += 0.25
         }
-        // Require a clear win over straight, otherwise leave the frame as-is.
-        return bestScore > base * 1.04 ? bestAngle : 0
+        // Tiered acceptance. Real scan skew is almost always ≤3°, so accept a
+        // gentle angle readily (3% win, was a flat 4%) — this recovers the mild
+        // "tilt not detected" cases. But a large angle is far more often a strong
+        // content edge (tree, railing, window frame) mistaken for rotation than a
+        // genuinely steep frame, so demand a much stronger win (8%) before
+        // trusting it, which rejects the content-edge false positives.
+        let margin = abs(bestAngle) <= 3.0 ? 1.03 : 1.08
+        return bestScore > base * margin ? bestAngle : 0
     }
 
     /// Cuts out a tilted frame and rotates it upright. `normalizedRect` is the
