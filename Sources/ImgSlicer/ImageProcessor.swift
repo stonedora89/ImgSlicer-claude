@@ -404,6 +404,22 @@ struct ImageProcessor: Sendable {
             )
         }
 
+        // Align each frame's top/bottom to its row's shared band. A dark frame
+        // whose flat content fooled the row detector into cutting it short (or
+        // letting it bleed out) is pulled back onto the row median the other
+        // frames prove. Runs last, after the frame set is final. Pure geometry.
+        candidates = candidates.map { candidate in
+            let aligned = alignRowVerticalBounds(candidate.regions)
+            guard aligned.map(\.rect) != candidate.regions.map(\.rect) else { return candidate }
+            return CropCandidate(
+                title: candidate.title,
+                detail: candidate.detail,
+                regions: aligned,
+                marginScale: candidate.marginScale,
+                score: candidate.score
+            )
+        }
+
         if candidates.isEmpty, !bestFallback.isEmpty {
             candidates.append(CropCandidate(
                 title: "单图裁切",
@@ -1791,6 +1807,62 @@ struct ImageProcessor: Sendable {
         }
         .enumerated()
         .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
+    }
+
+    /// Align each frame's top/bottom to its row's shared bounds.
+    ///
+    /// A dark frame (an aquarium, a dim ferry cabin) fools the row detector: its
+    /// flat dark content reads like a gutter, so the top/bottom edge is placed
+    /// inside the photo — the frame is cut off. But the OTHER frames in the same
+    /// row prove where the row's true top and bottom are (a contact-sheet row
+    /// shares one y-band). We pull an edge that deviates from the row median back
+    /// onto it — pure geometry, no brightness test, so it fixes both a dark frame
+    /// cut short and a frame whose edge bled out past the row. Gated: the row
+    /// needs a consistent majority to trust its median, and only clearly
+    /// deviating edges (>12% of row height) are moved.
+    private func alignRowVerticalBounds(_ regions: [CropRegion]) -> [CropRegion] {
+        guard regions.count >= 4 else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        let medianH = median(rects.map { Double($0.height) })
+        let rowTol = max(0.04, medianH * 0.4)
+        let order = regions.indices.sorted { Double(rects[$0].midY) < Double(rects[$1].midY) }
+        var rows: [[Int]] = []
+        for i in order {
+            if let ref = rows.last?.first, abs(Double(rects[i].midY) - Double(rects[ref].midY)) <= rowTol {
+                rows[rows.count - 1].append(i)
+            } else {
+                rows.append([i])
+            }
+        }
+
+        var output = regions
+        for row in rows {
+            guard row.count >= 3 else { continue }
+            let medTop = median(row.map { Double(rects[$0].minY) })
+            let medBottom = median(row.map { Double(rects[$0].maxY) })
+            let rowHeight = medBottom - medTop
+            guard rowHeight > 0 else { continue }
+            let tol = rowHeight * 0.12
+
+            // Trust the row median only if a majority already agree with it.
+            let consistent = row.filter {
+                abs(Double(rects[$0].minY) - medTop) < tol && abs(Double(rects[$0].maxY) - medBottom) < tol
+            }.count
+            guard Double(consistent) >= Double(row.count) * 0.5 else { continue }
+
+            for i in row {
+                let top = Double(rects[i].minY), bottom = Double(rects[i].maxY)
+                let newTop = abs(top - medTop) > tol ? medTop : top
+                let newBottom = abs(bottom - medBottom) > tol ? medBottom : bottom
+                guard newTop != top || newBottom != bottom, newBottom - newTop > 0.02 else { continue }
+                let r = rects[i]
+                let newRect = CGRect(x: Double(r.minX), y: newTop, width: Double(r.width), height: newBottom - newTop).normalized
+                output[i] = CropRegion(index: regions[i].index, rect: newRect, angle: regions[i].angle, isManual: regions[i].isManual)
+            }
+        }
+        return output
     }
 
     /// Foreground/component detectors can split one ordinary photo into several
