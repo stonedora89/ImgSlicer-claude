@@ -13,7 +13,8 @@ let package = Package(
         .executableTarget(
             name: "ImgSlicer",
             resources: [
-                .process("Resources")
+                .process("Resources"),
+                .copy("MLModel/PhotoSegmenter.mlmodelc")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),

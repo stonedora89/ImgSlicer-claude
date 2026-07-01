@@ -88,6 +88,25 @@ struct ImageProcessor: Sendable {
         preferredRegions(from: detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles), settings: settings)
     }
 
+    /// Regularize raw neural-segmentation boxes with the SAME grid geometry
+    /// passes the heuristic pipeline uses. The DL segmenter gives semantically
+    /// correct but ragged component boxes (a weak gutter can fuse two frames, a
+    /// speck can split one); reusing merge/split/align snaps them to the roll's
+    /// grid. This is the "DL + grid post-processing" split that scored 0.918 box
+    /// IoU in the prototype — the DL path's post-processing half.
+    func regularizeNeuralBoxes(_ rects: [CGRect]) -> [CropRegion] {
+        guard !rects.isEmpty else { return [] }
+        var regions = rects.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.normalized, isManual: false)
+        }
+        regions = mergeSubPitchFragments(regions)
+        regions = splitCrossColumnFrames(regions)
+        regions = alignRowVerticalBounds(regions)
+        return regions.enumerated().map {
+            CropRegion(index: $0.offset + 1, rect: $0.element.rect.normalized, isManual: false)
+        }
+    }
+
     func detectCropCandidates(for url: URL, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [CropCandidate] {
         guard let image = NSImage(contentsOf: url),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {

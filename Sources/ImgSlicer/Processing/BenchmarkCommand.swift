@@ -16,6 +16,7 @@ struct BenchmarkCommand: Sendable {
     let useSamples: Bool
     let dumpJSONPath: String?
     let labelsURL: URL?
+    let useNeural: Bool
 
     static func parse(arguments: [String]) -> BenchmarkCommand? {
         guard let commandIndex = arguments.firstIndex(of: "--benchmark") else { return nil }
@@ -56,7 +57,8 @@ struct BenchmarkCommand: Sendable {
             passThreshold: threshold,
             useSamples: arguments.contains("--use-samples"),
             dumpJSONPath: dumpJSONPath,
-            labelsURL: labelsURL
+            labelsURL: labelsURL,
+            useNeural: arguments.contains("--neural")
         )
     }
 
@@ -75,11 +77,23 @@ struct BenchmarkCommand: Sendable {
             dumpAllDetections(processor: processor, imageFiles: imageFiles, labels: labels, sampleProfiles: sampleProfiles, to: dumpPath)
         }
 
+        let segmenter = useNeural ? NeuralSegmenter() : nil
+        if useNeural && segmenter == nil {
+            print("Neural model failed to load (Resources/MLModel/PhotoSegmenter.mlmodelc).")
+            return
+        }
+
         var rows: [Row] = []
         for url in imageFiles {
             let key = relativePath(for: url)
             guard let truth = labels[key], !truth.isEmpty else { continue }
-            let detected = processor.detectCropRegions(for: url, settings: settings, sampleProfiles: sampleProfiles).map { $0.rect }
+            let detected: [CGRect]
+            if let segmenter, let cg = loadCGImage(url) {
+                // DL path: segment → component boxes → reuse grid post-processing.
+                detected = processor.regularizeNeuralBoxes(segmenter.detect(cgImage: cg)).map { $0.rect }
+            } else {
+                detected = processor.detectCropRegions(for: url, settings: settings, sampleProfiles: sampleProfiles).map { $0.rect }
+            }
             rows.append(Row(name: key, truth: truth, detected: detected, threshold: passThreshold))
         }
 
@@ -236,6 +250,11 @@ struct BenchmarkCommand: Sendable {
             labels[path] = rects
         }
         return labels
+    }
+
+    private func loadCGImage(_ url: URL) -> CGImage? {
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
     }
 
     private func relativePath(for url: URL) -> String {

@@ -35,6 +35,9 @@ def main():
         outputs=[ct.TensorType(name="mask_logits")],
         minimum_deployment_target=ct.target.macOS13,
         compute_units=ct.ComputeUnit.ALL,
+        # FLOAT32 I/O so the Swift side can read the MLMultiArray as Float
+        # directly; the default FLOAT16 would need half-precision handling.
+        compute_precision=ct.precision.FLOAT32,
     )
     mlmodel.short_description = "Photo-vs-gutter segmentation for film contact sheets"
     out = f"{ROOT}/PhotoSegmenter.mlpackage"
