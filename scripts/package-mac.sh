@@ -20,8 +20,10 @@ INSTALLER_PATH="$RELEASE_DIR/安装.command"
 cd "$ROOT_DIR"
 ruby "$ROOT_DIR/scripts/check-source-encoding.rb"
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/ModuleCache"
-swift build -c debug --cache-path "$ROOT_DIR/.build/cache"
-BIN_DIR="$(swift build -c debug --show-bin-path --cache-path "$ROOT_DIR/.build/cache")"
+# Release build: the detector is numerically heavy (full-res grayscale passes,
+# tilt estimation) and a debug build runs it 5–10× slower. Ship optimized.
+swift build -c release --cache-path "$ROOT_DIR/.build/cache"
+BIN_DIR="$(swift build -c release --show-bin-path --cache-path "$ROOT_DIR/.build/cache")"
 
 rm -rf "$RELEASE_DIR" "$LATEST_APP_DIR" "$ZIP_PATH"
 mkdir -p "$MACOS" "$RESOURCES"

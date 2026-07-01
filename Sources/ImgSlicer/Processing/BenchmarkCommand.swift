@@ -61,17 +61,19 @@ struct BenchmarkCommand: Sendable {
     }
 
     func run() {
-        guard let labels = loadLabels() else {
-            print("No labels found: \(folderURL.appendingPathComponent(".imgslicer-edits.json").path)")
-            print("Adjust some images in the app first — every manual correction is saved as a label.")
-            return
-        }
-
+        let labels = loadLabels() ?? [:]
         let processor = ImageProcessor()
         let imageFiles = AlgorithmComparisonCommand.imageFiles(in: folderURL)
         // Mirror the app: load the same sample library the UI feeds into
         // detection so the benchmark measures what the user actually sees.
         let sampleProfiles = useSamples ? SampleLibrary().load(rootURL: folderURL) : []
+
+        // Dump mode runs detection on EVERY image (not just labelled ones) and
+        // records each region's tilt angle, so the diagnostic overlay can show
+        // margins and rotation across the whole set.
+        if let dumpPath = dumpJSONPath {
+            dumpAllDetections(processor: processor, imageFiles: imageFiles, labels: labels, sampleProfiles: sampleProfiles, to: dumpPath)
+        }
 
         var rows: [Row] = []
         for url in imageFiles {
@@ -82,14 +84,34 @@ struct BenchmarkCommand: Sendable {
         }
 
         guard !rows.isEmpty else {
-            print("Found \(labels.count) labeled entries but none matched image files in \(folderURL.path).")
+            if dumpJSONPath == nil {
+                print("No labels found: \(folderURL.appendingPathComponent(".imgslicer-edits.json").path)")
+            }
             return
         }
 
-        if let dumpPath = dumpJSONPath {
-            dumpJSON(rows: rows, to: dumpPath)
-        }
         report(rows: rows)
+    }
+
+    /// Dump detection (with tilt angle) for every image, plus truth where
+    /// available. Used to diagnose margins/rotation across the full set.
+    private func dumpAllDetections(processor: ImageProcessor, imageFiles: [URL], labels: [String: [CGRect]], sampleProfiles: [SampleProfile], to path: String) {
+        var payload: [String: [String: Any]] = [:]
+        for url in imageFiles {
+            let key = relativePath(for: url)
+            let regions = processor.detectCropRegions(for: url, settings: settings, sampleProfiles: sampleProfiles)
+            let det: [[String: Double]] = regions.map {
+                ["x": $0.rect.minX, "y": $0.rect.minY, "width": $0.rect.width, "height": $0.rect.height, "angle": $0.angle]
+            }
+            var entry: [String: Any] = ["detected": det]
+            if let truth = labels[key] {
+                entry["truth"] = truth.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] }
+            }
+            payload[key] = entry
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        print("Dumped \(payload.count) images (with angles) to \(path)")
     }
 
     /// Write per-image detected and ground-truth boxes (normalized) to JSON so a
