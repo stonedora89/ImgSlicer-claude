@@ -295,10 +295,19 @@ struct ImageProcessor: Sendable {
                     height: fullGray.height
                 )
                 let repairedWidePairs = rebalanceAdjacentRowBoundaries(mergeCollapsedWideEdgePairs(contentTight))
+                // Recover a fully-missed row (over/double-exposed, no gutters):
+                // the surviving row proves the lattice and the sheet's vertical
+                // symmetry gives the missing band, pixel-verified before adding.
+                let rowCompleted = completeSecondRow(
+                    regions: repairedWidePairs,
+                    gray: fullGray.bytes,
+                    width: fullGray.width,
+                    height: fullGray.height
+                )
                 // Tilt estimation is the costly part, so only run it for the
                 // top-ranked candidate (the one shown/output by default).
                 let estimateTilt = candidateOffset == 0
-                let tiltedRegions = repairedWidePairs.enumerated().map {
+                let tiltedRegions = rowCompleted.enumerated().map {
                     let rect = $0.element.rect.normalized
                     let angle = (estimateTilt && !$0.element.isManual) ? estimateRegionTilt(
                         gray: fullGray.bytes, width: fullGray.width, height: fullGray.height, rect: rect
@@ -1699,6 +1708,83 @@ struct ImageProcessor: Sendable {
         return output.enumerated().map {
             CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual)
         }
+    }
+
+    /// Recover a whole row the detector missed entirely.
+    ///
+    /// An over-exposed / double-exposed row can yield zero frames — its
+    /// inter-frame gutters are washed out — so a 2-row contact sheet comes back
+    /// as one complete top row. But the surviving row proves the column lattice
+    /// (count, pitch, x-positions), and a contact sheet's two rows are vertically
+    /// symmetric, so the missing row's y-band is the mirror of the found one.
+    /// We synthesize it there, but only after verifying with pixels that the
+    /// mirrored band actually holds content in each column — so a genuinely
+    /// single-row scan (blank film base below) is never given a phantom row.
+    private func completeSecondRow(regions: [CropRegion], gray: [UInt8], width: Int, height: Int) -> [CropRegion] {
+        guard regions.count >= 5, width > 8, height > 8, gray.count >= width * height else { return regions }
+        let rects = regions.map { $0.rect.normalized }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+
+        // Must be a single row: vertical centres tightly clustered.
+        let medianH = median(rects.map { Double($0.height) })
+        let centreYs = rects.map { Double($0.midY) }
+        let meanY = centreYs.reduce(0, +) / Double(centreYs.count)
+        let spreadY = (centreYs.reduce(0) { $0 + ($1 - meanY) * ($1 - meanY) } / Double(centreYs.count)).squareRoot()
+        guard spreadY < medianH * 0.2 else { return regions }
+
+        // The row sits in the top half (so there is room for a mirror below).
+        let topRow = rects.map { Double($0.minY) }.min() ?? 0
+        let botRow = rects.map { Double($0.maxY) }.max() ?? 1
+        guard botRow < 0.55, botRow - topRow > 0.15 else { return regions }
+
+        // Regular column lattice: consistent pitch.
+        let centres = rects.map { Double($0.midX) }.sorted()
+        let gaps = zip(centres.dropFirst(), centres).map { $0 - $1 }
+        guard !gaps.isEmpty else { return regions }
+        let pitch = median(gaps)
+        let medianW = median(rects.map { Double($0.width) })
+        guard pitch > medianW * 0.85, pitch < medianW * 1.8 else { return regions }
+        guard gaps.allSatisfy({ $0 > pitch * 0.8 && $0 < pitch * 1.2 }) else { return regions }
+
+        // Mirror the row's y-band to the bottom half (vertical symmetry).
+        let top2 = 1 - botRow
+        let bot2 = 1 - topRow
+        guard top2 > botRow else { return regions }
+
+        // Pixel check: the mirrored band must carry content under each column.
+        let y0 = max(0, min(height - 1, Int(top2 * Double(height))))
+        let y1 = max(y0 + 1, min(height, Int(bot2 * Double(height))))
+        func columnStd(_ cx: Double) -> Double {
+            let x0 = max(0, min(width - 1, Int((cx - medianW * 0.35) * Double(width))))
+            let x1 = max(x0 + 1, min(width, Int((cx + medianW * 0.35) * Double(width))))
+            var sum = 0.0, sq = 0.0, n = 0.0
+            let stepX = max(1, (x1 - x0) / 40), stepY = max(1, (y1 - y0) / 60)
+            var y = y0
+            while y < y1 {
+                var x = x0
+                while x < x1 { let v = Double(gray[y * width + x]); sum += v; sq += v * v; n += 1; x += stepX }
+                y += stepY
+            }
+            guard n > 0 else { return 0 }
+            let m = sum / n
+            return max(0, sq / n - m * m).squareRoot()
+        }
+        let contentColumns = rects.filter { columnStd(Double($0.midX)) > 20 }.count
+        guard contentColumns >= regions.count - 1 else { return regions }
+
+        // Synthesize the mirror row, reusing each column's x/width.
+        var output = regions
+        for r in rects {
+            let rect = CGRect(x: Double(r.minX), y: top2, width: Double(r.width), height: bot2 - top2).normalized
+            output.append(CropRegion(index: 0, rect: rect, angle: 0, isManual: false))
+        }
+        return output.sorted {
+            let a = $0.rect.normalized, b = $1.rect.normalized
+            if abs(Double(a.midY) - Double(b.midY)) > medianH * 0.4 { return Double(a.midY) < Double(b.midY) }
+            return Double(a.midX) < Double(b.midX)
+        }
+        .enumerated()
+        .map { CropRegion(index: $0.offset + 1, rect: $0.element.rect, angle: $0.element.angle, isManual: $0.element.isManual) }
     }
 
     /// Foreground/component detectors can split one ordinary photo into several
