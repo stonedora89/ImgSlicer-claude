@@ -25,6 +25,7 @@ SOURCES=(
   "$ROOT_DIR/Sources/ImgSlicer/ExternalDetector.swift"
   "$ROOT_DIR/Sources/ImgSlicer/ImageLoading.swift"
   "$ROOT_DIR/Sources/ImgSlicer/ImageProcessor.swift"
+  "$ROOT_DIR/Sources/ImgSlicer/NeuralSegmenter.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Processing/CropDetectionPipeline.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Processing/CropEditStore.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Processing/SampleLibrary.swift"
@@ -40,6 +41,7 @@ CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache" swiftc \
   -framework AppKit \
   -framework Vision \
   -framework ImageIO \
+  -framework CoreML \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "${SOURCES[@]}" \
   -o "$MACOS/$APP_NAME"
@@ -47,6 +49,15 @@ CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache" swiftc \
 cp "$ROOT_DIR/Sources/ImgSlicer/Resources/icon.svg" "$RESOURCES/icon.svg"
 mkdir -p "$RESOURCES/detectors"
 cp "$ROOT_DIR/Sources/ImgSlicer/Resources/detectors/opencv_detector.py" "$RESOURCES/detectors/opencv_detector.py"
+
+# Bundle the compiled Core ML segmenter so NeuralSegmenter can load it via
+# Bundle.main on Mojave. If 10.14's Core ML can't load it, the app falls back to
+# the pure-heuristic box (no black-border trim) rather than failing.
+if [ -d "$ROOT_DIR/Sources/ImgSlicer/MLModel/PhotoSegmenter.mlmodelc" ]; then
+  ditto "$ROOT_DIR/Sources/ImgSlicer/MLModel/PhotoSegmenter.mlmodelc" "$RESOURCES/PhotoSegmenter.mlmodelc"
+else
+  echo "WARNING: PhotoSegmenter.mlmodelc missing; Mojave build will run heuristic-only (black borders kept)"
+fi
 
 if [ -d "$ROOT_DIR/vendor/python-standalone" ]; then
   ditto "$ROOT_DIR/vendor/python-standalone" "$RESOURCES/python"

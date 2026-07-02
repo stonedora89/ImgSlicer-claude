@@ -19,11 +19,25 @@ struct NeuralSegmenter {
     private let model: MLModel
 
     init?() {
-        guard let url = Bundle.module.url(forResource: "PhotoSegmenter", withExtension: "mlmodelc"),
+        guard let url = Self.modelURL(),
               let model = try? MLModel(contentsOf: url) else {
             return nil
         }
         self.model = model
+    }
+
+    /// The compiled Core ML model lives in the app bundle's resources. The SwiftPM
+    /// build exposes it via the generated `Bundle.module`; the direct-swiftc Mojave
+    /// build (no SwiftPM, no `Bundle.module` symbol) ships it in `Contents/Resources`
+    /// and finds it through `Bundle.main`. Returning nil here makes the caller fall
+    /// back to the pure-heuristic box, so a model that 10.14's Core ML can't load
+    /// degrades gracefully instead of crashing.
+    private static func modelURL() -> URL? {
+#if IMGSLICER_MOJAVE
+        return Bundle.main.url(forResource: "PhotoSegmenter", withExtension: "mlmodelc")
+#else
+        return Bundle.module.url(forResource: "PhotoSegmenter", withExtension: "mlmodelc")
+#endif
     }
 
     /// Segment the scan and return frame boxes (standalone --neural path).
