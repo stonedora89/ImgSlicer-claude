@@ -19,6 +19,7 @@ final class MojaveAppDelegate: NSObject, NSApplicationDelegate {
         controller = MojaveWindowController()
         controller?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        controller?.runStartupArguments()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -114,6 +115,17 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
         exportButton.isEnabled = false
     }
 
+    /// Scripted driving for hosts where the window can't receive synthetic
+    /// clicks (dev machines newer than the 10.14 target). `--auto-import
+    /// <path>` runs the same path as the 导入 button minus the open panel;
+    /// adding `--auto-export` then runs 识别并导出.
+    func runStartupArguments() {
+        let args = ProcessInfo.processInfo.arguments
+        guard let flag = args.firstIndex(of: "--auto-import"), args.indices.contains(flag + 1) else { return }
+        importURLs([URL(fileURLWithPath: args[flag + 1])])
+        if args.contains("--auto-export") { processAll() }
+    }
+
     @objc private func importItems() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -121,9 +133,12 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
         panel.allowsMultipleSelection = true
         panel.allowedFileTypes = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "bmp", "gif"]
         guard panel.runModal() == .OK else { return }
+        importURLs(panel.urls)
+    }
 
+    private func importURLs(_ urls: [URL]) {
         var imported: [FolderTask] = []
-        for url in panel.urls {
+        for url in urls {
             if let result = try? scanner.scan(url: url) {
                 imported.append(contentsOf: result.tasks.map { editStore.restoredTask($0) })
             }
@@ -189,6 +204,11 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
                     self.editStore.save(photos: self.tasks[taskIndex].photos, in: self.tasks[taskIndex])
                 }
                 self.tableView.reloadData()
+                // reloadData can drop the selection, leaving the preview on the
+                // pre-export placeholder box — reselect so it shows the result.
+                if self.tableView.selectedRow < 0, !self.rows.isEmpty {
+                    self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                }
                 if self.tableView.selectedRow >= 0 { self.showPhoto(at: self.tableView.selectedRow) }
                 self.statusLabel.stringValue = "完成：已输出 \(outputCount) 张裁切图片"
                 self.setBusy(false)
@@ -256,8 +276,11 @@ final class MojavePreviewView: NSView {
     var regions: [CropRegion] = []
 
     override func draw(_ dirtyRect: NSRect) {
+        // macOS 14+ hosts stop clipping draws to the view's bounds by default,
+        // and the first paint hands us a window-sized dirtyRect — filling it
+        // as-is floods the whole window dark and hides the controls/table.
         NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
-        dirtyRect.fill()
+        bounds.intersection(dirtyRect).fill()
         guard let image = image, image.size.width > 0, image.size.height > 0 else {
             let hint = "导入图片或文件夹后，这里显示预览"
             let attrs: [NSAttributedString.Key: Any] = [
