@@ -88,7 +88,12 @@ rm -f "$INTEL_EXECUTABLE" "$ARM_EXECUTABLE"
 cat > "$EXECUTABLE" <<'SCRIPT'
 #!/bin/bash
 
-LOG="$HOME/Desktop/fiona-spotter-tool-mojave-launcher.log"
+# Log under ~/Library/Logs, NOT ~/Desktop: on Catalina+ the Desktop is
+# TCC-protected per code-signature, so a freshly signed build gets its
+# redirect denied and bash aborts (exit 1) before exec ever runs — the app
+# then "does nothing" when opened from Finder/LaunchServices.
+mkdir -p "$HOME/Library/Logs" 2>/dev/null || true
+LOG="$HOME/Library/Logs/fiona-spotter-tool-mojave-launcher.log"
 APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_CONTENTS_DIR="$(cd "$APP_MACOS_DIR/.." && pwd)"
 REAL_EXECUTABLE="$APP_MACOS_DIR/fiona-spotter-tool-bin"
@@ -258,7 +263,8 @@ APP_NAME="FionaSpotterTool.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
-LOG="$HOME/Desktop/fiona-spotter-tool-diagnostic.log"
+mkdir -p "$HOME/Library/Logs" 2>/dev/null || true
+LOG="$HOME/Library/Logs/fiona-spotter-tool-diagnostic.log"
 
 echo "Diagnostic started: $(date)" > "$LOG"
 echo "macOS: $(sw_vers -productVersion)" >> "$LOG"
@@ -281,8 +287,8 @@ otool -L "$APP/Contents/MacOS/fiona-spotter-tool-bin" >> "$LOG" 2>&1 || true
 echo "Launching via app launcher..." >> "$LOG"
 "$APP/Contents/MacOS/fiona-spotter-tool" >> "$LOG" 2>&1 &
 
-echo "诊断已启动，日志在桌面：fiona-spotter-tool-diagnostic.log"
-echo "启动器日志在桌面：fiona-spotter-tool-mojave-launcher.log"
+echo "诊断已启动，日志在 ~/Library/Logs/fiona-spotter-tool-diagnostic.log"
+echo "启动器日志在 ~/Library/Logs/fiona-spotter-tool-mojave-launcher.log"
 read -n 1 -s -r -p "按任意键关闭窗口..."
 SCRIPT
 

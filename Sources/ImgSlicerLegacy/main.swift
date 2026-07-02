@@ -88,8 +88,15 @@ enum LegacyFolderScanner {
 
 enum LegacyLaunchLog {
     static let url: URL = {
-        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-        return (desktop ?? URL(fileURLWithPath: NSTemporaryDirectory()))
+        // ~/Library/Logs, not Desktop: on Catalina+ the Desktop is TCC-gated
+        // per code-signature, which blocks a freshly built (re-signed) app.
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Logs", isDirectory: true)
+        if let logs {
+            try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            return logs.appendingPathComponent("fiona-spotter-tool-mojave.log")
+        }
+        return URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fiona-spotter-tool-mojave.log")
     }()
 
