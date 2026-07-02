@@ -62,8 +62,12 @@ def main():
     manual = [m["stem"] for m in man if m["manual"]]
     pseudo = [m["stem"] for m in man if not m["manual"]]
     random.seed(0); random.shuffle(manual)
-    val = manual[:3]; train = pseudo + manual[3:]
-    print(f"train {len(train)} (val {len(val)} manual held out), device {DEV}")
+    # The auto pseudo-labels include black borders; the hand-corrected manual
+    # labels have them trimmed. Up-weight manual 6× so the model learns the
+    # user's tight, border-free edges rather than averaging toward the loose auto
+    # boxes. (Pseudo-labels stay in for scene variety.)
+    val = manual[:3]; train = pseudo + manual[3:] * 6
+    print(f"train {len(train)} (manual up-weighted 6×, val {len(val)} held out), device {DEV}")
     tl = DataLoader(SegSet(train), batch_size=8, shuffle=True)
     net = UNet().to(DEV); opt = torch.optim.Adam(net.parameters(), 1e-3)
     for ep in range(25):

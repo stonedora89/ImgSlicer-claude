@@ -26,12 +26,23 @@ struct NeuralSegmenter {
         self.model = model
     }
 
-    /// Segment the scan and return frame boxes in normalized coordinates.
+    /// Segment the scan and return frame boxes (standalone --neural path).
     func detect(cgImage: CGImage) -> [CGRect] {
+        guard let m = foregroundMask(cgImage: cgImage) else { return [] }
+        return Self.componentBoxes(mask: m.mask, width: m.width, height: m.height)
+    }
+
+    /// Photo-vs-gutter foreground mask, thresholded at sigmoid 0.8 and eroded so
+    /// the edge sits on the CONFIDENT photo content — trimming the black border a
+    /// softer 0.5 boundary keeps. Per-frame adaptive: each frame's probability
+    /// falloff differs, so the same erosion removes a different border thickness.
+    /// Used both for boxes (detect) and to trim heuristic boxes' top/bottom to
+    /// the content (the hybrid border-trim path).
+    func foregroundMask(cgImage: CGImage) -> (mask: [Bool], width: Int, height: Int)? {
         let W = Self.inputWidth, H = Self.inputHeight
         guard let gray = Self.grayscaleResized(cgImage, width: W, height: H),
               let input = try? MLMultiArray(shape: [1, 1, NSNumber(value: H), NSNumber(value: W)], dataType: .float32) else {
-            return []
+            return nil
         }
         let ptr = input.dataPointer.bindMemory(to: Float.self, capacity: W * H)
         for i in 0..<(W * H) { ptr[i] = Float(gray[i]) / 255.0 }
@@ -39,16 +50,17 @@ struct NeuralSegmenter {
         guard let provider = try? MLDictionaryFeatureProvider(dictionary: ["image": input]),
               let out = try? model.prediction(from: provider),
               let logits = firstMultiArray(in: out) else {
-            return []
+            return nil
         }
 
-        // Threshold the sigmoid at 0.5 → binary foreground.
         let count = W * H
         var fg = [Bool](repeating: false, count: count)
         let lp = logits.dataPointer.bindMemory(to: Float.self, capacity: count)
-        for i in 0..<count { fg[i] = lp[i] > 0 }  // sigmoid(x)>0.5 ⇔ x>0
-
-        return Self.componentBoxes(foreground: fg, width: W, height: H)
+        // sigmoid(x)>0.8 ⇔ x>1.386: drop half-certain black-border pixels.
+        for i in 0..<count { fg[i] = lp[i] > 1.386 }
+        fg = Self.morphologicalOpen(fg, width: W, height: H, iterations: 2)
+        fg = Self.erode(fg, width: W, height: H)
+        return (fg, W, H)
     }
 
     private func firstMultiArray(in provider: MLFeatureProvider) -> MLMultiArray? {
@@ -73,11 +85,9 @@ struct NeuralSegmenter {
     }
 
     /// Two-pass connected-component labelling (4-connectivity) → normalized
-    /// bounding boxes, dropping specks and slivers. A morphological open (erode
-    /// then dilate) first snaps thin bridges between frames so a weak gutter does
-    /// not fuse two photos into one component.
-    static func componentBoxes(foreground fgIn: [Bool], width: Int, height: Int) -> [CGRect] {
-        var fg = morphologicalOpen(fgIn, width: width, height: height, iterations: 2)
+    /// bounding boxes, dropping specks and slivers. The mask is already
+    /// morphologically cleaned (open + erode) by `foregroundMask`.
+    static func componentBoxes(mask fg: [Bool], width: Int, height: Int) -> [CGRect] {
         var labels = [Int](repeating: 0, count: width * height)
         var next = 1
         var stack = [Int]()

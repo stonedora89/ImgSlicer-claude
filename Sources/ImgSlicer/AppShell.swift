@@ -459,6 +459,13 @@ struct PhotoCanvas: View {
                     .clipped()
                     .shadow(color: .black.opacity(0.36), radius: 26, y: 18)
                     .frame(width: proxy.size.width, height: proxy.size.height)
+                    // Rasterize the photo layer once into a Metal texture. While
+                    // dragging a crop handle the canvas body re-renders every
+                    // frame; without this the large (2200px) image is
+                    // re-rasterized each time — the drag lag, worst on the widest
+                    // scans. drawingGroup lets the unchanged image reuse its
+                    // cached texture so only the overlay repaints.
+                    .drawingGroup()
 
                 MultiCropOverlay(
                     regions: regions,

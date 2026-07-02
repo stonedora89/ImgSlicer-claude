@@ -85,7 +85,61 @@ struct ImageProcessor: Sendable {
     }
 
     func detectCropRegions(for url: URL, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [CropRegion] {
-        preferredRegions(from: detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles), settings: settings)
+        let regions = preferredRegions(from: detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles), settings: settings)
+        // Hybrid border trim: keep the heuristic box (count, left/right edges),
+        // but pull top/bottom inward to the DL foreground so the black/white film
+        // border is excluded — the user's "no black border" requirement, done
+        // per-frame (each frame's border thickness differs) without cutting the
+        // subject (inward-only, capped).
+        return trimTopBottomWithNeuralMask(regions, url: url)
+    }
+
+    // Loading the Core ML model is not free, so keep one shared instance.
+    nonisolated(unsafe) private static let sharedSegmenter: NeuralSegmenter? = NeuralSegmenter()
+
+    private func trimTopBottomWithNeuralMask(_ regions: [CropRegion], url: URL) -> [CropRegion] {
+        guard !regions.isEmpty,
+              let segmenter = ImageProcessor.sharedSegmenter,
+              let image = NSImage(contentsOf: url),
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let m = segmenter.foregroundMask(cgImage: cg) else { return regions }
+        return trimTopBottomToForeground(regions, mask: m.mask, maskWidth: m.width, maskHeight: m.height)
+    }
+
+    /// Pull each frame's top and bottom edge INWARD to the DL foreground (photo
+    /// content), skipping the black/white film border the heuristic box kept.
+    /// Inward-only and capped at 1/4 of the frame, so it trims the border without
+    /// eating the subject. Left/right are untouched (the heuristic gets those
+    /// right and the DL mask is looser there).
+    private func trimTopBottomToForeground(_ regions: [CropRegion], mask: [Bool], maskWidth: Int, maskHeight: Int) -> [CropRegion] {
+        guard maskWidth > 0, maskHeight > 0, mask.count >= maskWidth * maskHeight else { return regions }
+        return regions.map { region in
+            let r = region.rect.normalized
+            let x0 = max(0, min(maskWidth - 1, Int(Double(r.minX) * Double(maskWidth))))
+            let x1 = max(x0 + 1, min(maskWidth, Int(Double(r.maxX) * Double(maskWidth))))
+            let y0 = max(0, min(maskHeight - 1, Int(Double(r.minY) * Double(maskHeight))))
+            let y1 = max(y0 + 1, min(maskHeight, Int(Double(r.maxY) * Double(maskHeight))))
+            guard x1 - x0 > 4, y1 - y0 > 8 else { return region }
+            let inset = max(1, (x1 - x0) / 5)
+            func rowIsContent(_ y: Int) -> Bool {
+                var count = 0
+                let base = y * maskWidth
+                for x in (x0 + inset)..<(x1 - inset) where mask[base + x] { count += 1 }
+                return count * 2 > (x1 - x0 - 2 * inset)  // majority foreground
+            }
+            let cap = (y1 - y0) / 4
+            var top = y0
+            while top < y0 + cap && !rowIsContent(top) { top += 1 }
+            var bottom = y1 - 1
+            while bottom > y1 - 1 - cap && !rowIsContent(bottom) { bottom -= 1 }
+            guard bottom - top > (y1 - y0) / 2 else { return region }
+            // Inward-only: never push an edge outward past the heuristic box.
+            let newMinY = max(Double(r.minY), Double(top) / Double(maskHeight))
+            let newMaxY = min(Double(r.maxY), Double(bottom + 1) / Double(maskHeight))
+            guard newMaxY - newMinY > Double(r.height) * 0.5 else { return region }
+            let newRect = CGRect(x: Double(r.minX), y: newMinY, width: Double(r.width), height: newMaxY - newMinY).normalized
+            return CropRegion(index: region.index, rect: newRect, angle: region.angle, isManual: region.isManual)
+        }
     }
 
     /// Regularize raw neural-segmentation boxes with the SAME grid geometry
