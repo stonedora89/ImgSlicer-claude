@@ -56,15 +56,15 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.spacing = 10
-        root.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(root)
 
+        // Controls row. A gravity-distributed vertical stack was collapsing the
+        // whole layout (the bare preview NSView, with no intrinsic height, grabbed
+        // all vertical space and hid the controls/table), so lay the three regions
+        // out with explicit constraints instead.
         let controls = NSStackView()
         controls.orientation = .horizontal
         controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
         importButton.target = self
         importButton.action = #selector(importItems)
         locateButton.target = self
@@ -75,13 +75,12 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
         controls.addArrangedSubview(locateButton)
         controls.addArrangedSubview(exportButton)
         controls.addArrangedSubview(statusLabel)
+        content.addSubview(controls)
 
-        let body = NSStackView()
-        body.orientation = .horizontal
-        body.spacing = 10
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("photos"))
         column.title = "图片"
         column.width = 250
@@ -91,20 +90,25 @@ private let importButton = NSButton(title: "导入", target: nil, action: nil)
         tableView.dataSource = self
         tableView.rowHeight = 28
         scroll.documentView = tableView
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.widthAnchor.constraint(equalToConstant: 270).isActive = true
-        preview.translatesAutoresizingMaskIntoConstraints = false
-        body.addArrangedSubview(scroll)
-        body.addArrangedSubview(preview)
+        content.addSubview(scroll)
 
-        root.addArrangedSubview(controls)
-        root.addArrangedSubview(body)
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(preview)
+
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            root.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
-            body.widthAnchor.constraint(equalTo: root.widthAnchor),
+            controls.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            controls.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            controls.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+
+            scroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            scroll.widthAnchor.constraint(equalToConstant: 270),
+
+            preview.topAnchor.constraint(equalTo: scroll.topAnchor),
+            preview.leadingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: 10),
+            preview.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            preview.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
         ])
         locateButton.isEnabled = false
         exportButton.isEnabled = false
@@ -252,9 +256,18 @@ final class MojavePreviewView: NSView {
     var regions: [CropRegion] = []
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor(calibratedWhite: 0.08, alpha: 1).setFill()
+        NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
         dirtyRect.fill()
-        guard let image = image, image.size.width > 0, image.size.height > 0 else { return }
+        guard let image = image, image.size.width > 0, image.size.height > 0 else {
+            let hint = "导入图片或文件夹后，这里显示预览"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 15),
+                .foregroundColor: NSColor(calibratedWhite: 0.6, alpha: 1),
+            ]
+            let size = hint.size(withAttributes: attrs)
+            hint.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attrs)
+            return
+        }
         let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
         let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
         let imageRect = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
