@@ -156,13 +156,37 @@ struct ImageProcessor: Sendable {
     }
 
     /// Post-detection cleanup shared by every path that hands boxes to the UI
-    /// or the cropper, so the preview shows exactly what will be cut: borders
-    /// pulled to the subject (no film black edge kept) and tilted boxes kept
-    /// inside the image. Adaptive by design — no per-image margin parameters.
+    /// or the cropper, so the preview shows exactly what will be cut: a fixed
+    /// proportional inward inset (excludes the film rim) and tilted boxes kept
+    /// inside the image. The inset is deliberately NOT content-adaptive — the
+    /// user chose predictability after adaptive trims misread dark subjects as
+    /// border; its worst case IS its average case. Proportions were calibrated
+    /// against the user's 195 manual boxes in 分割测试: the top rim (wave +
+    /// haze) needed up to ~1.4% of the frame height, the other edges were
+    /// nearly clean.
     func finalizeRegions(_ regions: [CropRegion], url: URL) -> [CropRegion] {
-        var result = trimTopBottomWithNeuralMask(regions, url: url)
+        var result = fixedInsetRegions(regions)
         result = clampRotatedRegions(result, imageSize: ImageProcessor.imagePixelSize(url: url))
         return result
+    }
+
+    private func fixedInsetRegions(_ regions: [CropRegion]) -> [CropRegion] {
+        let topInset = 0.016
+        let bottomInset = 0.008
+        let sideInset = 0.005
+        return regions.map { region in
+            let r = region.rect.normalized
+            let dx = Double(r.width) * sideInset
+            let dyTop = Double(r.height) * topInset
+            let dyBottom = Double(r.height) * bottomInset
+            let rect = CGRect(
+                x: Double(r.minX) + dx,
+                y: Double(r.minY) + dyTop,
+                width: Double(r.width) - 2 * dx,
+                height: Double(r.height) - dyTop - dyBottom
+            ).normalized
+            return CropRegion(index: region.index, rect: rect, angle: region.angle, isManual: region.isManual)
+        }
     }
 
     private static func imagePixelSize(url: URL) -> CGSize {
