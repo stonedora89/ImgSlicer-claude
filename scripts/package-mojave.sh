@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="ImgSlicer-Mojave"
 VERSION="0.35.12-mojave"
-BUILD="49"
+BUILD="50"
 BUILD_DIR="$ROOT_DIR/.build/mojave"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$DIST_DIR/$APP_NAME-$VERSION-$BUILD"
@@ -20,6 +20,7 @@ mkdir -p "$BUILD_DIR" "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 
 SOURCES=(
   "$ROOT_DIR/Sources/ImgSlicerMojave/MojaveMain.swift"
+  "$ROOT_DIR/Sources/ImgSlicerMojave/MojaveStore.swift"
   "$ROOT_DIR/Sources/ImgSlicer/Models.swift"
   "$ROOT_DIR/Sources/ImgSlicer/FolderScanner.swift"
   "$ROOT_DIR/Sources/ImgSlicer/ExternalDetector.swift"
