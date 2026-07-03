@@ -156,6 +156,9 @@ final class MojaveWindowController: NSWindowController, NSWindowDelegate {
         wireStore()
         installKeyMonitor()
         refresh()
+        // Focus starts on the canvas, not the first margin field — otherwise
+        // the Space shortcut (框选新增) types a space into the field instead.
+        window.initialFirstResponder = previewPanel.canvas
     }
 
     required init?(coder: NSCoder) { nil }
@@ -1527,8 +1530,8 @@ final class FilmstripView: NSView {
 
     private let title = mojaveLabel("图片胶片栏", size: 13, weight: .semibold)
     private let statusLine = mojaveLabel("", size: 11, color: MojaveTheme.muted)
-    private let previousButton = mojaveActionButton("‹", target: nil, action: nil)
-    private let nextButton = mojaveActionButton("›", target: nil, action: nil)
+    private let previousButton = NSButton(title: "‹ 上一张", target: nil, action: nil)
+    private let nextButton = NSButton(title: "下一张 ›", target: nil, action: nil)
     private let scroll = NSScrollView()
     private let thumbsStack = NSStackView()
     private var photoIDs: [PhotoItem.ID] = []
@@ -1548,13 +1551,20 @@ final class FilmstripView: NSView {
         addSubview(title)
         addSubview(statusLine)
 
+        for button in [previousButton, nextButton] {
+            button.bezelStyle = .rounded
+            button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 78).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        }
         previousButton.target = self
         previousButton.action = #selector(previousTapped)
-        previousButton.toolTip = "上一张"
+        previousButton.toolTip = "上一张（← 方向键）"
         addSubview(previousButton)
         nextButton.target = self
         nextButton.action = #selector(nextTapped)
-        nextButton.toolTip = "下一张"
+        nextButton.toolTip = "下一张（→ 方向键）"
         addSubview(nextButton)
 
         scroll.hasHorizontalScroller = false

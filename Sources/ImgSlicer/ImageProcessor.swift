@@ -22,7 +22,9 @@ struct ImageProcessor: Sendable {
             if Task.isCancelled { break }
             autoreleasepool {
                 let candidates = detectCropCandidates(for: photo.url, settings: settings, sampleProfiles: sampleProfiles)
-                let regions = preferredRegions(from: candidates, settings: settings)
+                // Same finalize pass as the export path, so the boxes shown in
+                // the preview are exactly the boxes that will be cut.
+                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url)
                 results.append(PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: candidates, outputURLs: [], failed: false))
             }
         }
@@ -54,7 +56,9 @@ struct ImageProcessor: Sendable {
         photos.filter { !$0.hasLocalOverrides }.map { photo in
             autoreleasepool {
                 let candidates = detectCropCandidates(for: photo.url, settings: settings, sampleProfiles: sampleProfiles)
-                let regions = preferredRegions(from: candidates, settings: settings)
+                // Same finalize pass as the export path, so the boxes shown in
+                // the preview are exactly the boxes that will be cut.
+                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url)
                 return PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: candidates, outputURLs: [], failed: false)
             }
         }
@@ -91,7 +95,7 @@ struct ImageProcessor: Sendable {
         // border is excluded — the user's "no black border" requirement, done
         // per-frame (each frame's border thickness differs) without cutting the
         // subject (inward-only, capped).
-        return trimTopBottomWithNeuralMask(regions, url: url)
+        return finalizeRegions(regions, url: url)
     }
 
     // Loading the Core ML model is not free, so keep one shared instance.
@@ -103,15 +107,73 @@ struct ImageProcessor: Sendable {
               let image = NSImage(contentsOf: url),
               let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let m = segmenter.foregroundMask(cgImage: cg) else { return regions }
-        return trimTopBottomToForeground(regions, mask: m.mask, maskWidth: m.width, maskHeight: m.height)
+        return trimToForeground(regions, mask: m.mask, maskWidth: m.width, maskHeight: m.height)
     }
 
-    /// Pull each frame's top and bottom edge INWARD to the DL foreground (photo
-    /// content), skipping the black/white film border the heuristic box kept.
-    /// Inward-only and capped at 1/4 of the frame, so it trims the border without
-    /// eating the subject. Left/right are untouched (the heuristic gets those
-    /// right and the DL mask is looser there).
-    private func trimTopBottomToForeground(_ regions: [CropRegion], mask: [Bool], maskWidth: Int, maskHeight: Int) -> [CropRegion] {
+    /// Post-detection cleanup shared by every path that hands boxes to the UI
+    /// or the cropper, so the preview shows exactly what will be cut: borders
+    /// pulled to the subject (no film black edge kept) and tilted boxes kept
+    /// inside the image. Adaptive by design — no per-image margin parameters.
+    func finalizeRegions(_ regions: [CropRegion], url: URL) -> [CropRegion] {
+        var result = trimTopBottomWithNeuralMask(regions, url: url)
+        result = clampRotatedRegions(result, imageSize: ImageProcessor.imagePixelSize(url: url))
+        return result
+    }
+
+    private static func imagePixelSize(url: URL) -> CGSize {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Double,
+              let height = props[kCGImagePropertyPixelHeight] as? Double else { return .zero }
+        return CGSize(width: width, height: height)
+    }
+
+    /// A tilted crop is rotated about its centre in pixel space; if the rotated
+    /// corners poke past the image edge the exported cut gets padded with
+    /// emptiness. Shrink the box about its centre just enough to fit — and if
+    /// honouring the tilt would cost more than 25% of the frame, the angle
+    /// estimate itself is implausible, so drop the tilt instead.
+    private func clampRotatedRegions(_ regions: [CropRegion], imageSize: CGSize) -> [CropRegion] {
+        guard imageSize.width > 0, imageSize.height > 0 else { return regions }
+        return regions.map { region in
+            guard abs(region.angle) > 0.05 else { return region }
+            var next = region
+            let rect = CGRect(
+                x: region.rect.minX * imageSize.width,
+                y: region.rect.minY * imageSize.height,
+                width: region.rect.width * imageSize.width,
+                height: region.rect.height * imageSize.height
+            )
+            let radians = region.angle * .pi / 180
+            let cosA = abs(cos(radians))
+            let sinA = abs(sin(radians))
+            let extentX = rect.width / 2 * cosA + rect.height / 2 * sinA
+            let extentY = rect.width / 2 * sinA + rect.height / 2 * cosA
+            let allowedX = min(rect.midX, imageSize.width - rect.midX)
+            let allowedY = min(rect.midY, imageSize.height - rect.midY)
+            let scale = min(1, allowedX / max(extentX, 1), allowedY / max(extentY, 1))
+            if scale >= 0.999 { return region }
+            if scale < 0.75 {
+                next.angle = 0
+                return next
+            }
+            let newWidth = rect.width * scale
+            let newHeight = rect.height * scale
+            next.rect = CGRect(
+                x: (rect.midX - newWidth / 2) / imageSize.width,
+                y: (rect.midY - newHeight / 2) / imageSize.height,
+                width: newWidth / imageSize.width,
+                height: newHeight / imageSize.height
+            ).normalized
+            return next
+        }
+    }
+
+    /// Pull each frame's edges INWARD to the DL foreground (photo content),
+    /// skipping the black/white film border the heuristic box kept. Inward-only
+    /// and capped (1/4 of the frame vertically, 1/8 horizontally — the mask is
+    /// looser on the sides), so it trims border without eating the subject.
+    private func trimToForeground(_ regions: [CropRegion], mask: [Bool], maskWidth: Int, maskHeight: Int) -> [CropRegion] {
         guard maskWidth > 0, maskHeight > 0, mask.count >= maskWidth * maskHeight else { return regions }
         return regions.map { region in
             let r = region.rect.normalized
@@ -127,17 +189,36 @@ struct ImageProcessor: Sendable {
                 for x in (x0 + inset)..<(x1 - inset) where mask[base + x] { count += 1 }
                 return count * 2 > (x1 - x0 - 2 * inset)  // majority foreground
             }
-            let cap = (y1 - y0) / 4
+            let capY = (y1 - y0) / 4
             var top = y0
-            while top < y0 + cap && !rowIsContent(top) { top += 1 }
+            while top < y0 + capY && !rowIsContent(top) { top += 1 }
             var bottom = y1 - 1
-            while bottom > y1 - 1 - cap && !rowIsContent(bottom) { bottom -= 1 }
+            while bottom > y1 - 1 - capY && !rowIsContent(bottom) { bottom -= 1 }
             guard bottom - top > (y1 - y0) / 2 else { return region }
+
+            // Columns judged inside the trimmed vertical span so the film's
+            // top/bottom border can't dilute the side test.
+            let vInset = max(1, (bottom - top) / 5)
+            func colIsContent(_ x: Int) -> Bool {
+                var count = 0
+                for y in (top + vInset)...(bottom - vInset) where mask[y * maskWidth + x] { count += 1 }
+                return count * 2 > (bottom - top - 2 * vInset)
+            }
+            let capX = (x1 - x0) / 8
+            var left = x0
+            while left < x0 + capX && !colIsContent(left) { left += 1 }
+            var right = x1 - 1
+            while right > x1 - 1 - capX && !colIsContent(right) { right -= 1 }
+            guard right - left > (x1 - x0) / 2 else { return region }
+
             // Inward-only: never push an edge outward past the heuristic box.
             let newMinY = max(Double(r.minY), Double(top) / Double(maskHeight))
             let newMaxY = min(Double(r.maxY), Double(bottom + 1) / Double(maskHeight))
-            guard newMaxY - newMinY > Double(r.height) * 0.5 else { return region }
-            let newRect = CGRect(x: Double(r.minX), y: newMinY, width: Double(r.width), height: newMaxY - newMinY).normalized
+            let newMinX = max(Double(r.minX), Double(left) / Double(maskWidth))
+            let newMaxX = min(Double(r.maxX), Double(right + 1) / Double(maskWidth))
+            guard newMaxY - newMinY > Double(r.height) * 0.5,
+                  newMaxX - newMinX > Double(r.width) * 0.5 else { return region }
+            let newRect = CGRect(x: newMinX, y: newMinY, width: newMaxX - newMinX, height: newMaxY - newMinY).normalized
             return CropRegion(index: region.index, rect: newRect, angle: region.angle, isManual: region.isManual)
         }
     }
