@@ -103,11 +103,16 @@ struct ImageProcessor: Sendable {
 
     private final class ForegroundMaskBox {
         let mask: [Bool]
+        /// Luma at mask resolution — the border test needs real pixels because
+        /// the segmenter's mask bleeds past the frame top and calls border
+        /// "foreground" there.
+        let gray: [UInt8]
         let width: Int
         let height: Int
 
-        init(mask: [Bool], width: Int, height: Int) {
+        init(mask: [Bool], gray: [UInt8], width: Int, height: Int) {
             self.mask = mask
+            self.gray = gray
             self.width = width
             self.height = height
         }
@@ -134,10 +139,20 @@ struct ImageProcessor: Sendable {
             ]
             guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
                   let m = segmenter.foregroundMask(cgImage: cg) else { return regions }
-            box = ForegroundMaskBox(mask: m.mask, width: m.width, height: m.height)
+            var gray: [UInt8] = []
+            if let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: m.width, pixelsHigh: m.height,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: m.width * 4, bitsPerPixel: 32
+            ), let context = NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext {
+                context.interpolationQuality = .medium
+                context.draw(cg, in: CGRect(x: 0, y: 0, width: m.width, height: m.height))
+                gray = grayscaleBytes(bitmap: bitmap, width: m.width, height: m.height)
+            }
+            box = ForegroundMaskBox(mask: m.mask, gray: gray, width: m.width, height: m.height)
             ImageProcessor.maskCache.setObject(box, forKey: key)
         }
-        return trimToForeground(regions, mask: box.mask, maskWidth: box.width, maskHeight: box.height)
+        return trimToForeground(regions, mask: box.mask, gray: box.gray, maskWidth: box.width, maskHeight: box.height)
     }
 
     /// Post-detection cleanup shared by every path that hands boxes to the UI
@@ -203,8 +218,9 @@ struct ImageProcessor: Sendable {
     /// skipping the black/white film border the heuristic box kept. Inward-only
     /// and capped (1/4 of the frame vertically, 1/8 horizontally — the mask is
     /// looser on the sides), so it trims border without eating the subject.
-    private func trimToForeground(_ regions: [CropRegion], mask: [Bool], maskWidth: Int, maskHeight: Int) -> [CropRegion] {
+    private func trimToForeground(_ regions: [CropRegion], mask: [Bool], gray: [UInt8], maskWidth: Int, maskHeight: Int) -> [CropRegion] {
         guard maskWidth > 0, maskHeight > 0, mask.count >= maskWidth * maskHeight else { return regions }
+        let hasGray = gray.count >= maskWidth * maskHeight
         return regions.map { region in
             let r = region.rect.normalized
             let x0 = max(0, min(maskWidth - 1, Int(Double(r.minX) * Double(maskWidth))))
@@ -212,12 +228,29 @@ struct ImageProcessor: Sendable {
             let y0 = max(0, min(maskHeight - 1, Int(Double(r.minY) * Double(maskHeight))))
             let y1 = max(y0 + 1, min(maskHeight, Int(Double(r.maxY) * Double(maskHeight))))
             guard x1 - x0 > 4, y1 - y0 > 8 else { return region }
-            let inset = max(1, (x1 - x0) / 5)
+            // Narrow inset: the wavy border overflows worst at the frame
+            // corners, which a 1/5 inset excluded from the row test entirely.
+            let inset = max(1, (x1 - x0) / 12)
+            // A row still crossing the wavy black border shows a meaningful
+            // near-black share; the mask alone misses this because it bleeds
+            // past the frame top. Calibrated against the user's manual boxes
+            // in 分割测试.
+            // The inter-row rebate (dark brown, frame-number text) isn't black
+            // enough for a strict dark test, so use a higher luma cut-off; the
+            // 8% share requirement keeps genuinely dark *content* rows safe.
+            func rowDarkShare(_ y: Int) -> Double {
+                guard hasGray else { return 0 }
+                var dark = 0
+                let base = y * maskWidth
+                for x in (x0 + inset)..<(x1 - inset) where gray[base + x] < 52 { dark += 1 }
+                return Double(dark) / Double(max(1, x1 - x0 - 2 * inset))
+            }
             func rowIsContent(_ y: Int) -> Bool {
                 var count = 0
                 let base = y * maskWidth
                 for x in (x0 + inset)..<(x1 - inset) where mask[base + x] { count += 1 }
-                return count * 2 > (x1 - x0 - 2 * inset)  // majority foreground
+                guard count * 100 >= (x1 - x0 - 2 * inset) * 90 else { return false }
+                return rowDarkShare(y) <= 0.08
             }
             let capY = (y1 - y0) / 4
             var top = y0
@@ -242,7 +275,12 @@ struct ImageProcessor: Sendable {
             guard right - left > (x1 - x0) / 2 else { return region }
 
             // Inward-only: never push an edge outward past the heuristic box.
-            let newMinY = max(Double(r.minY), Double(top) / Double(maskHeight))
+            // The top gets a small extra safety inset: calibration against the
+            // user's manual boxes (分割测试) showed the frame's top rim keeps a
+            // hazy残边 below any measurable dark/texture signal, and the user
+            // consistently trims ~0.7% of the frame height beyond it.
+            let topSafety = Double(r.height) * 0.007
+            let newMinY = max(Double(r.minY), Double(top) / Double(maskHeight)) + topSafety
             let newMaxY = min(Double(r.maxY), Double(bottom + 1) / Double(maskHeight))
             let newMinX = max(Double(r.minX), Double(left) / Double(maskWidth))
             let newMaxX = min(Double(r.maxX), Double(right + 1) / Double(maskWidth))

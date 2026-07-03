@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="ImgSlicer-Mojave"
 VERSION="0.35.12-mojave"
-BUILD="52"
+BUILD="53"
 BUILD_DIR="$ROOT_DIR/.build/mojave"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$DIST_DIR/$APP_NAME-$VERSION-$BUILD"
