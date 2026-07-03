@@ -24,7 +24,7 @@ struct ImageProcessor: Sendable {
                 let candidates = detectCropCandidates(for: photo.url, settings: settings, sampleProfiles: sampleProfiles)
                 // Same finalize pass as the export path, so the boxes shown in
                 // the preview are exactly the boxes that will be cut.
-                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url)
+                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url, settings: settings)
                 results.append(PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: candidates, outputURLs: [], failed: false))
             }
         }
@@ -58,7 +58,7 @@ struct ImageProcessor: Sendable {
                 let candidates = detectCropCandidates(for: photo.url, settings: settings, sampleProfiles: sampleProfiles)
                 // Same finalize pass as the export path, so the boxes shown in
                 // the preview are exactly the boxes that will be cut.
-                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url)
+                let regions = finalizeRegions(preferredRegions(from: candidates, settings: settings), url: photo.url, settings: settings)
                 return PhotoProcessResult(photoURL: photo.url, regions: regions, candidates: candidates, outputURLs: [], failed: false)
             }
         }
@@ -95,7 +95,7 @@ struct ImageProcessor: Sendable {
         // border is excluded — the user's "no black border" requirement, done
         // per-frame (each frame's border thickness differs) without cutting the
         // subject (inward-only, capped).
-        return finalizeRegions(regions, url: url)
+        return finalizeRegions(regions, url: url, settings: settings)
     }
 
     // Loading the Core ML model is not free, so keep one shared instance.
@@ -164,26 +164,31 @@ struct ImageProcessor: Sendable {
     /// against the user's 195 manual boxes in 分割测试: the top rim (wave +
     /// haze) needed up to ~1.4% of the frame height, the other edges were
     /// nearly clean.
-    func finalizeRegions(_ regions: [CropRegion], url: URL) -> [CropRegion] {
-        var result = fixedInsetRegions(regions)
-        result = clampRotatedRegions(result, imageSize: ImageProcessor.imagePixelSize(url: url))
+    func finalizeRegions(_ regions: [CropRegion], url: URL, settings: CropSettings = CropSettings()) -> [CropRegion] {
+        let imageSize = ImageProcessor.imagePixelSize(url: url)
+        var result = fixedInsetRegions(regions, imageSize: imageSize, settings: settings)
+        result = clampRotatedRegions(result, imageSize: imageSize)
         return result
     }
 
-    private func fixedInsetRegions(_ regions: [CropRegion]) -> [CropRegion] {
+    private func fixedInsetRegions(_ regions: [CropRegion], imageSize: CGSize, settings: CropSettings) -> [CropRegion] {
         let topInset = 0.016
         let bottomInset = 0.008
         let sideInset = 0.005
+        // User adjustment arrives in original-image pixels; convert once.
+        let pxX = imageSize.width > 0 ? 1.0 / imageSize.width : 0
+        let pxY = imageSize.height > 0 ? 1.0 / imageSize.height : 0
         return regions.map { region in
             let r = region.rect.normalized
-            let dx = Double(r.width) * sideInset
-            let dyTop = Double(r.height) * topInset
-            let dyBottom = Double(r.height) * bottomInset
+            let left = Double(r.width) * sideInset + settings.insetLeftPixels * pxX
+            let right = Double(r.width) * sideInset + settings.insetRightPixels * pxX
+            let top = Double(r.height) * topInset + settings.insetTopPixels * pxY
+            let bottom = Double(r.height) * bottomInset + settings.insetBottomPixels * pxY
             let rect = CGRect(
-                x: Double(r.minX) + dx,
-                y: Double(r.minY) + dyTop,
-                width: Double(r.width) - 2 * dx,
-                height: Double(r.height) - dyTop - dyBottom
+                x: Double(r.minX) + left,
+                y: Double(r.minY) + top,
+                width: Double(r.width) - left - right,
+                height: Double(r.height) - top - bottom
             ).normalized
             return CropRegion(index: region.index, rect: rect, angle: region.angle, isManual: region.isManual)
         }

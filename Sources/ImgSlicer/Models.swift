@@ -154,6 +154,13 @@ struct CropSettings: Sendable {
     var bottom: Double = 0
     var left: Double = 0
     var right: Double = 0
+    /// Extra inward shrink per edge in ORIGINAL-IMAGE pixels, applied on top
+    /// of the fixed proportional inset after detection. User-adjustable from
+    /// the 全局内收 panel; 0 keeps the calibrated baseline.
+    var insetTopPixels: Double = 0
+    var insetBottomPixels: Double = 0
+    var insetLeftPixels: Double = 0
+    var insetRightPixels: Double = 0
     var sensitivity: Double = 64
     var splitSensitivity: Double = 62
     var minimumRegionPercent: Double = 0.6

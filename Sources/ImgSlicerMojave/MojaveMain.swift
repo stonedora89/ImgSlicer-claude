@@ -259,10 +259,13 @@ final class MojaveWindowController: NSWindowController, NSWindowDelegate {
 
         parameterPanel.onMarginsChanged = { [weak self] top, bottom, left, right in
             guard let self else { return }
-            self.store.settings.top = top
-            self.store.settings.bottom = bottom
-            self.store.settings.left = left
-            self.store.settings.right = right
+            // Extra inward shrink in original-image pixels, on top of the
+            // fixed baseline inset; applies to newly located photos and
+            // re-bakes the current task's auto boxes immediately.
+            self.store.settings.insetTopPixels = top
+            self.store.settings.insetBottomPixels = bottom
+            self.store.settings.insetLeftPixels = left
+            self.store.settings.insetRightPixels = right
             self.store.reapplySelectedCandidateMargins()
         }
         parameterPanel.onToggleDraw = { [weak self] in self?.store.toggleDrawNewRegion() }
@@ -1339,10 +1342,10 @@ final class ParameterPanelView: PanelBoxView {
         grid.spacing = 6
         grid.translatesAutoresizingMaskIntoConstraints = false
         addSubview(grid)
-        let row1 = NSStackView(views: [marginField("上边距", topField), marginField("下边距", bottomField)])
+        let row1 = NSStackView(views: [marginField("上收 (px)", topField), marginField("下收 (px)", bottomField)])
         row1.spacing = 8
         row1.distribution = .fillEqually
-        let row2 = NSStackView(views: [marginField("左边距", leftField), marginField("右边距", rightField)])
+        let row2 = NSStackView(views: [marginField("左收 (px)", leftField), marginField("右收 (px)", rightField)])
         row2.spacing = 8
         row2.distribution = .fillEqually
         grid.addArrangedSubview(row1)

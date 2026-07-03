@@ -504,7 +504,13 @@ final class MojaveStore {
             guard !tasks[taskIndex].photos[photoIndex].hasLocalOverrides,
                   let candidateID = tasks[taskIndex].photos[photoIndex].selectedCandidateID,
                   let candidate = tasks[taskIndex].photos[photoIndex].cropCandidates.first(where: { $0.id == candidateID }) else { continue }
-            let adjusted = candidate.adjustedRegions(settings: settings)
+            // Re-run the same finalize pass as detection so the new inset
+            // pixels take effect from the stored raw candidate boxes.
+            let adjusted = processor.finalizeRegions(
+                candidate.adjustedRegions(settings: settings),
+                url: tasks[taskIndex].photos[photoIndex].url,
+                settings: settings
+            )
             tasks[taskIndex].photos[photoIndex].autoCropRegions = adjusted
             tasks[taskIndex].photos[photoIndex].cropRegions = adjusted
             editStore.save(photo: tasks[taskIndex].photos[photoIndex], in: tasks[taskIndex])
@@ -512,11 +518,11 @@ final class MojaveStore {
         }
 
         if applied > 0 {
-            logMessage = "已按当前边距更新自动裁切框。"
-            logSubMessage = "本任务 \(applied) 张自动图已应用上下左右边距；手动图未改动。"
+            logMessage = "已按当前内收像素更新自动裁切框。"
+            logSubMessage = "本任务 \(applied) 张自动图已重新内收；手动图未改动。"
         } else {
-            logMessage = "当前任务没有可应用边距的自动裁切框。"
-            logSubMessage = "手动调整过的图片保留本地结果，不随全局边距变化。"
+            logMessage = "当前任务没有可应用内收的自动裁切框。"
+            logSubMessage = "手动调整过的图片保留本地结果，不随全局内收变化。"
         }
         notify()
     }
