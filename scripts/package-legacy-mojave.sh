@@ -35,8 +35,6 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 EXECUTABLE="$MACOS/$EXECUTABLE_NAME"
 REAL_EXECUTABLE="$MACOS/$EXECUTABLE_NAME-bin"
-INTEL_EXECUTABLE="$MACOS/$EXECUTABLE_NAME-bin-x86_64"
-ARM_EXECUTABLE="$MACOS/$EXECUTABLE_NAME-bin-arm64"
 DMG_PATH="$DIST_DIR/$RELEASE_NAME.dmg"
 README_PATH="$RELEASE_DIR/其他Mac打开说明.txt"
 CHANGELOG_PATH="$RELEASE_DIR/版本更新说明.txt"
@@ -59,31 +57,22 @@ SOURCES=(
   "Sources/ImgSlicer/Processing/SampleLibrary.swift"
 )
 
-build_slice() {
-  local target="$1" output="$2"
-  CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache" swiftc \
-    -swift-version 5 \
-    -D IMGSLICER_MOJAVE \
-    -module-cache-path "$BUILD_DIR/ModuleCache" \
-    -target "$target" \
-    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
-    -O \
-    -framework AppKit \
-    -framework ImageIO \
-    -framework CoreGraphics \
-    -framework Vision \
-    -framework CoreML \
-    "${SOURCES[@]}" \
-    -o "$output"
-}
-
-build_slice "x86_64-apple-macosx10.14" "$INTEL_EXECUTABLE"
-# Apple Silicon did not exist on Mojave. The arm64 slice therefore targets the
-# first macOS release that supports it, while the Intel slice remains Mojave.
-build_slice "arm64-apple-macosx11.0" "$ARM_EXECUTABLE"
-
-lipo -create "$INTEL_EXECUTABLE" "$ARM_EXECUTABLE" -output "$REAL_EXECUTABLE"
-rm -f "$INTEL_EXECUTABLE" "$ARM_EXECUTABLE"
+# Intel/10.14 only — the deployment target is the Mojave host. Local
+# verification on Apple Silicon dev machines runs this slice under Rosetta.
+CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache" swiftc \
+  -swift-version 5 \
+  -D IMGSLICER_MOJAVE \
+  -module-cache-path "$BUILD_DIR/ModuleCache" \
+  -target "x86_64-apple-macosx10.14" \
+  -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+  -O \
+  -framework AppKit \
+  -framework ImageIO \
+  -framework CoreGraphics \
+  -framework Vision \
+  -framework CoreML \
+  "${SOURCES[@]}" \
+  -o "$REAL_EXECUTABLE"
 
 cat > "$EXECUTABLE" <<'SCRIPT'
 #!/bin/bash
@@ -210,7 +199,8 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 
 说明：
 - 界面与操作方式与 0.35.2-39 完全一致。
-- 本包为 Intel(10.14)+Apple Silicon(11.0) 双架构。
+- 本包为 Intel(10.14) 单架构，目标平台是 Mojave 主机；
+  在 Apple Silicon 开发机上通过 Rosetta 运行验证。
 TXT
 
 cat > "$INSTALLER_PATH" <<'SCRIPT'
