@@ -235,28 +235,41 @@ struct ImageProcessor: Sendable {
             // near-black share; the mask alone misses this because it bleeds
             // past the frame top. Calibrated against the user's manual boxes
             // in 分割测试.
-            // The inter-row rebate (dark brown, frame-number text) isn't black
-            // enough for a strict dark test, so use a higher luma cut-off; the
-            // 8% share requirement keeps genuinely dark *content* rows safe.
+            // Strictness is banded: the film rim is THIN, so the demanding
+            // tests (near-full mask coverage + near-black share) only apply
+            // within a few percent of the box edge. Deeper rows fall back to
+            // the long-proven majority test — otherwise dark CONTENT near an
+            // edge (a horse's mane, a dark storefront) reads as "still border"
+            // and the trim eats up to a quarter of the subject.
             func rowDarkShare(_ y: Int) -> Double {
                 guard hasGray else { return 0 }
                 var dark = 0
                 let base = y * maskWidth
-                for x in (x0 + inset)..<(x1 - inset) where gray[base + x] < 52 { dark += 1 }
+                // True border black only — dark-brown fur/shadow stays above.
+                for x in (x0 + inset)..<(x1 - inset) where gray[base + x] < 42 { dark += 1 }
                 return Double(dark) / Double(max(1, x1 - x0 - 2 * inset))
             }
-            func rowIsContent(_ y: Int) -> Bool {
+            let strictBand = max(2, (y1 - y0) * 6 / 100)
+            // The dark-share test exists for the TOP rim / inter-row band
+            // (calibration: 42/195 top overflows vs 5 bottoms). At the bottom
+            // it misreads dark subjects (a horse's mane) as border, so the
+            // bottom scan uses coverage only.
+            func rowIsContent(_ y: Int, edgeDistance: Int, useDarkTest: Bool) -> Bool {
                 var count = 0
                 let base = y * maskWidth
                 for x in (x0 + inset)..<(x1 - inset) where mask[base + x] { count += 1 }
-                guard count * 100 >= (x1 - x0 - 2 * inset) * 90 else { return false }
-                return rowDarkShare(y) <= 0.08
+                let span = x1 - x0 - 2 * inset
+                if edgeDistance <= strictBand {
+                    guard count * 100 >= span * 90 else { return false }
+                    return !useDarkTest || rowDarkShare(y) <= 0.08
+                }
+                return count * 2 > span
             }
             let capY = (y1 - y0) / 4
             var top = y0
-            while top < y0 + capY && !rowIsContent(top) { top += 1 }
+            while top < y0 + capY && !rowIsContent(top, edgeDistance: top - y0, useDarkTest: true) { top += 1 }
             var bottom = y1 - 1
-            while bottom > y1 - 1 - capY && !rowIsContent(bottom) { bottom -= 1 }
+            while bottom > y1 - 1 - capY && !rowIsContent(bottom, edgeDistance: y1 - 1 - bottom, useDarkTest: false) { bottom -= 1 }
             guard bottom - top > (y1 - y0) / 2 else { return region }
 
             // Columns judged inside the trimmed vertical span so the film's
