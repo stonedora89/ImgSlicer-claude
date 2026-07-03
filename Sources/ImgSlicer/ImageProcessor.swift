@@ -101,13 +101,43 @@ struct ImageProcessor: Sendable {
     // Loading the Core ML model is not free, so keep one shared instance.
     nonisolated(unsafe) private static let sharedSegmenter: NeuralSegmenter? = NeuralSegmenter()
 
+    private final class ForegroundMaskBox {
+        let mask: [Bool]
+        let width: Int
+        let height: Int
+
+        init(mask: [Bool], width: Int, height: Int) {
+            self.mask = mask
+            self.width = width
+            self.height = height
+        }
+    }
+
+    // Cached per photo: the locate pass computes the mask, the export pass
+    // reuses it instead of running the segmenter again.
+    nonisolated(unsafe) private static let maskCache = NSCache<NSString, ForegroundMaskBox>()
+
     private func trimTopBottomWithNeuralMask(_ regions: [CropRegion], url: URL) -> [CropRegion] {
-        guard !regions.isEmpty,
-              let segmenter = ImageProcessor.sharedSegmenter,
-              let image = NSImage(contentsOf: url),
-              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let m = segmenter.foregroundMask(cgImage: cg) else { return regions }
-        return trimToForeground(regions, mask: m.mask, maskWidth: m.width, maskHeight: m.height)
+        guard !regions.isEmpty, let segmenter = ImageProcessor.sharedSegmenter else { return regions }
+        let key = url.path as NSString
+        let box: ForegroundMaskBox
+        if let cached = ImageProcessor.maskCache.object(forKey: key) {
+            box = cached
+        } else {
+            // The mask is model-input resolution (coarse), so a 1280px decode
+            // is plenty — a full-size decode here doubled per-photo time.
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return regions }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1280,
+            ]
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+                  let m = segmenter.foregroundMask(cgImage: cg) else { return regions }
+            box = ForegroundMaskBox(mask: m.mask, width: m.width, height: m.height)
+            ImageProcessor.maskCache.setObject(box, forKey: key)
+        }
+        return trimToForeground(regions, mask: box.mask, maskWidth: box.width, maskHeight: box.height)
     }
 
     /// Post-detection cleanup shared by every path that hands boxes to the UI

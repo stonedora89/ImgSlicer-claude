@@ -828,22 +828,75 @@ final class PreviewPanelView: NSView {
             summaryBox.isHidden = true
         }
         canvas.render(photo: photo, selectedRegionID: store.selectedCropRegionID, isDrawing: store.isDrawingNewRegion)
+        prefetchNeighbors(store: store)
+    }
+
+    /// Decode the previous/next photos at canvas size in the background, so
+    /// stepping through the roll shows instantly instead of buffering.
+    private func prefetchNeighbors(store: MojaveStore) {
+        guard let photos = store.selectedTask?.photos,
+              let index = photos.firstIndex(where: { $0.id == store.selectedPhoto?.id }) else { return }
+        for neighbor in [index - 1, index + 1, index + 2] where photos.indices.contains(neighbor) {
+            MojaveImageLoader.shared.load(url: photos[neighbor].url, maxPixel: CropCanvasView.canvasMaxPixel) { _ in }
+        }
     }
 }
 
 // MARK: - Crop canvas (image + draggable boxes; port of PhotoCanvas/MultiCropOverlay)
 
 final class CropCanvasView: NSView {
+    static let canvasMaxPixel = 1600
+    static let filmstripMaxPixel = 140
+
     var onSelectRegion: ((CropRegion.ID) -> Void)?
     var onDeleteRegion: ((CropRegion.ID) -> Void)?
     var onChangeRegion: ((CropRegion.ID, CGRect) -> Void)?
     var onDrawNewRegion: ((CGRect) -> Void)?
 
+    // The photo sits in its own view below a transparent overlay that draws
+    // the boxes, so dragging a box only repaints the overlay strokes —
+    // redrawing the large image every mouse-move was the drag lag (same fix
+    // as the modern app's .drawingGroup()). Both children pass hits through
+    // so the canvas keeps all mouse handling.
+    private final class PassthroughImageView: NSImageView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    fileprivate final class CanvasOverlayView: NSView {
+        weak var owner: CropCanvasView?
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func draw(_ dirtyRect: NSRect) {
+            owner?.drawOverlay(dirtyRect)
+        }
+    }
+
+    private let photoView = PassthroughImageView()
+    private let overlay = CanvasOverlayView()
     private var photoURL: URL?
     private var image: NSImage?
     private var regions: [CropRegion] = []
     private var selectedRegionID: CropRegion.ID?
     private var isDrawingMode = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        photoView.imageScaling = .scaleProportionallyUpOrDown
+        photoView.autoresizingMask = [.width, .height]
+        photoView.frame = bounds
+        addSubview(photoView)
+        overlay.owner = self
+        overlay.autoresizingMask = [.width, .height]
+        overlay.frame = bounds
+        addSubview(overlay)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private func refreshOverlay() {
+        overlay.needsDisplay = true
+    }
 
     private enum DragKind {
         case move
@@ -881,13 +934,18 @@ final class CropCanvasView: NSView {
         if let photo {
             if photoURL != photo.url {
                 photoURL = photo.url
-                image = MojaveImageLoader.shared.cached(url: photo.url, maxPixel: 2200)
+                image = MojaveImageLoader.shared.cached(url: photo.url, maxPixel: Self.canvasMaxPixel)
                 if image == nil {
+                    // Show the filmstrip-resolution thumb immediately (enough
+                    // to know which photo this is), swap in the editing-size
+                    // decode when it lands.
+                    image = MojaveImageLoader.shared.cached(url: photo.url, maxPixel: Self.filmstripMaxPixel)
                     let url = photo.url
-                    MojaveImageLoader.shared.load(url: url, maxPixel: 2200) { [weak self] loaded in
-                        guard let self, self.photoURL == url else { return }
+                    MojaveImageLoader.shared.load(url: url, maxPixel: Self.canvasMaxPixel) { [weak self] loaded in
+                        guard let self, self.photoURL == url, let loaded else { return }
                         self.image = loaded
-                        self.needsDisplay = true
+                        self.photoView.image = loaded
+                        self.refreshOverlay()
                     }
                 }
             }
@@ -898,7 +956,8 @@ final class CropCanvasView: NSView {
         if isDrawing {
             NSCursor.crosshair.set()
         }
-        needsDisplay = true
+        photoView.image = image
+        refreshOverlay()
     }
 
     private var imageRect: CGRect {
@@ -909,7 +968,7 @@ final class CropCanvasView: NSView {
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
+    fileprivate func drawOverlay(_ dirtyRect: NSRect) {
         // Clip explicitly: macOS 14+ hands a window-sized dirtyRect and no
         // longer clips draws to view bounds by default.
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -917,11 +976,8 @@ final class CropCanvasView: NSView {
         context.clip(to: bounds)
         defer { context.restoreGState() }
 
-        guard let image else { return }
+        guard image != nil else { return }
         let frame = imageRect
-
-        NSGraphicsContext.current?.imageInterpolation = .medium
-        image.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
 
         if isDrawingMode {
             NSColor(white: 0, alpha: 0.28).setFill()
@@ -1112,7 +1168,7 @@ final class CropCanvasView: NSView {
             let y = min(state.startPoint.y, point.y)
             state.currentRect = CGRect(x: x, y: y, width: abs(point.x - state.startPoint.x), height: abs(point.y - state.startPoint.y))
             dragState = state
-            needsDisplay = true
+            refreshOverlay()
             return
         }
 
@@ -1159,7 +1215,7 @@ final class CropCanvasView: NSView {
         if next.height < 8 { next.size.height = 8 }
         state.currentRect = normalize(next, in: frame)
         dragState = state
-        needsDisplay = true
+        refreshOverlay()
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1171,7 +1227,7 @@ final class CropCanvasView: NSView {
             let rect = state.currentRect
             NSCursor.arrow.set()
             guard rect.width > 6, rect.height > 6, frame.width > 0 else {
-                needsDisplay = true
+                refreshOverlay()
                 return
             }
             onDrawNewRegion?(normalize(rect.intersection(frame), in: frame))
@@ -1181,7 +1237,7 @@ final class CropCanvasView: NSView {
         if let regionID = state.regionID {
             onChangeRegion?(regionID, state.currentRect)
         }
-        needsDisplay = true
+        refreshOverlay()
     }
 
     private func isMove(_ kind: DragKind) -> Bool {
@@ -1690,11 +1746,13 @@ final class FilmThumbView: NSView {
             statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
         ])
 
+        // Identification-size only — the filmstrip just needs to show which
+        // photo this is, not navigable detail.
         let url = photo.url
-        if let cached = MojaveImageLoader.shared.cached(url: url, maxPixel: 200) {
+        if let cached = MojaveImageLoader.shared.cached(url: url, maxPixel: CropCanvasView.filmstripMaxPixel) {
             button.image = cached
         } else {
-            MojaveImageLoader.shared.load(url: url, maxPixel: 200) { [weak button] image in
+            MojaveImageLoader.shared.load(url: url, maxPixel: CropCanvasView.filmstripMaxPixel) { [weak button] image in
                 button?.image = image
             }
         }
