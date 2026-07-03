@@ -68,8 +68,11 @@ final class MojaveStore {
     private let processor = ImageProcessor()
     private let editStore = CropEditStore()
     private let sampleLibrary = SampleLibrary()
-    private let locatorQueue = DispatchQueue(label: "imgslicer.mojave.locator", qos: .userInitiated)
-    private let processingQueue = DispatchQueue(label: "imgslicer.mojave.processing", qos: .userInitiated)
+    // Utility QoS: pre-locating and batch processing are heavy full-image
+    // passes; at userInitiated they starve the UI thread (Rosetta especially)
+    // and photo navigation stutters while they run.
+    private let locatorQueue = DispatchQueue(label: "imgslicer.mojave.locator", qos: .utility)
+    private let processingQueue = DispatchQueue(label: "imgslicer.mojave.processing", qos: .utility)
     private var locatorToken: CancellationToken?
     private var isProcessingQueueRunning = false
     private let prefetchForwardCount = 10

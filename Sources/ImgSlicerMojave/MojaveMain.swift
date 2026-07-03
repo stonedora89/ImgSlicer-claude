@@ -849,7 +849,7 @@ final class PreviewPanelView: NSView {
 
 final class CropCanvasView: NSView {
     static let canvasMaxPixel = 1600
-    static let filmstripMaxPixel = 140
+    static let filmstripMaxPixel = 96
 
     var onSelectRegion: ((CropRegion.ID) -> Void)?
     var onDeleteRegion: ((CropRegion.ID) -> Void)?
@@ -1594,7 +1594,7 @@ final class FilmstripView: NSView {
     private let scroll = NSScrollView()
     private let thumbsStack = NSStackView()
     private var photoIDs: [PhotoItem.ID] = []
-    private var renderedSignature = ""
+    private var thumbViews: [FilmThumbView] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1690,22 +1690,27 @@ final class FilmstripView: NSView {
         previousButton.isEnabled = index > 0
         nextButton.isEnabled = !photos.isEmpty && index < photos.count - 1
 
-        let signature = photos.map { "\($0.id)|\($0.id == selectedID)|\($0.status.rawValue)" }.joined()
-        guard signature != renderedSignature else { return }
-        renderedSignature = signature
-        photoIDs = photos.map { $0.id }
-
-        for view in thumbsStack.arrangedSubviews {
-            thumbsStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
+        // Rebuild thumb views only when the photo LIST changes; selection and
+        // status changes just restyle in place — tearing down every thumb on
+        // each arrow press was the navigation stutter.
+        let ids = photos.map { $0.id }
+        if ids != photoIDs {
+            photoIDs = ids
+            for view in thumbsStack.arrangedSubviews {
+                thumbsStack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+            thumbViews = photos.enumerated().map { offset, photo in
+                let thumb = FilmThumbView(photo: photo)
+                thumb.button.tag = offset
+                thumb.button.target = self
+                thumb.button.action = #selector(thumbTapped(_:))
+                thumbsStack.addArrangedSubview(thumb)
+                return thumb
+            }
         }
-        for (offset, photo) in photos.enumerated() {
-            let active = photo.id == selectedID
-            let thumb = FilmThumbView(photo: photo, active: active)
-            thumb.button.tag = offset
-            thumb.button.target = self
-            thumb.button.action = #selector(thumbTapped(_:))
-            thumbsStack.addArrangedSubview(thumb)
+        for (offset, photo) in photos.enumerated() where thumbViews.indices.contains(offset) {
+            thumbViews[offset].update(active: photo.id == selectedID, status: photo.status)
         }
         if let selectedIndex = photos.firstIndex(where: { $0.id == selectedID }),
            thumbsStack.arrangedSubviews.indices.contains(selectedIndex) {
@@ -1720,15 +1725,15 @@ final class FilmstripView: NSView {
 
 final class FilmThumbView: NSView {
     let button: NSButton
+    private let nameLabel: NSTextField
 
-    init(photo: PhotoItem, active: Bool) {
+    init(photo: PhotoItem) {
         button = NSButton(title: "", target: nil, action: nil)
+        nameLabel = mojaveLabel(photo.name, size: 9, color: MojaveTheme.muted)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.cornerRadius = 8
-        layer?.borderWidth = active ? 2 : 1
-        layer?.borderColor = active ? MojaveTheme.orange.cgColor : NSColor(white: 1, alpha: 0.10).cgColor
         layer?.backgroundColor = NSColor(white: 0, alpha: 0.3).cgColor
 
         button.isBordered = false
@@ -1736,21 +1741,24 @@ final class FilmThumbView: NSView {
         button.translatesAutoresizingMaskIntoConstraints = false
         addSubview(button)
 
-        let statusLabel = mojaveLabel(photo.status.rawValue, size: 9, color: active ? MojaveTheme.orange : MojaveTheme.muted)
-        addSubview(statusLabel)
+        // Per the user: the strip only needs a rough picture + the file name
+        // to know which photo it is — no navigable detail.
+        nameLabel.alignment = .center
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(nameLabel)
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 96),
             button.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            statusLabel.topAnchor.constraint(equalTo: button.bottomAnchor, constant: 2),
-            statusLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+            nameLabel.topAnchor.constraint(equalTo: button.bottomAnchor, constant: 2),
+            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            nameLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
         ])
 
-        // Identification-size only — the filmstrip just needs to show which
-        // photo this is, not navigable detail.
+        update(active: false, status: photo.status)
         let url = photo.url
         if let cached = MojaveImageLoader.shared.cached(url: url, maxPixel: CropCanvasView.filmstripMaxPixel) {
             button.image = cached
@@ -1762,4 +1770,11 @@ final class FilmThumbView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func update(active: Bool, status: PhotoStatus) {
+        layer?.borderWidth = active ? 2 : 1
+        layer?.borderColor = active ? MojaveTheme.orange.cgColor : NSColor(white: 1, alpha: 0.10).cgColor
+        nameLabel.textColor = active ? MojaveTheme.orange : MojaveTheme.muted
+        toolTip = status.rawValue
+    }
 }
