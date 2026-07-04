@@ -6,7 +6,7 @@ program(1.0)
             tensor<fp32, [64, 32, 2, 2]> u2_weight = const()[name = tensor<string, []>("u2_weight"), val = tensor<fp32, [64, 32, 2, 2]>(BLOBFILE(path = tensor<string, []>("@model_path/weights/weight.bin"), offset = tensor<uint64, []>(256)))];
             tensor<fp32, [16]> u1_bias = const()[name = tensor<string, []>("u1_bias"), val = tensor<fp32, [16]>(BLOBFILE(path = tensor<string, []>("@model_path/weights/weight.bin"), offset = tensor<uint64, []>(33088)))];
             tensor<fp32, [32, 16, 2, 2]> u1_weight = const()[name = tensor<string, []>("u1_weight"), val = tensor<fp32, [32, 16, 2, 2]>(BLOBFILE(path = tensor<string, []>("@model_path/weights/weight.bin"), offset = tensor<uint64, []>(33216)))];
-            tensor<fp32, [1]> out_bias = const()[name = tensor<string, []>("out_bias"), val = tensor<fp32, [1]>([0x1.44aaccp-3])];
+            tensor<fp32, [1]> out_bias = const()[name = tensor<string, []>("out_bias"), val = tensor<fp32, [1]>([0x1.d58222p-5])];
             tensor<fp32, [1, 16, 1, 1]> out_weight = const()[name = tensor<string, []>("out_weight"), val = tensor<fp32, [1, 16, 1, 1]>(BLOBFILE(path = tensor<string, []>("@model_path/weights/weight.bin"), offset = tensor<uint64, []>(41472)))];
             tensor<string, []> input_1_pad_type_0 = const()[name = tensor<string, []>("input_1_pad_type_0"), val = tensor<string, []>("custom")];
             tensor<int32, [4]> input_1_pad_0 = const()[name = tensor<string, []>("input_1_pad_0"), val = tensor<int32, [4]>([1, 1, 1, 1])];

@@ -19,7 +19,8 @@ import torch
 import scipy.ndimage as ndi
 from train import UNet, ROOT, DEV
 
-SRC = "/Users/howell/work/ImgSlicer-claude/分割测试"
+import sys, os
+SRC = sys.argv[1] if len(sys.argv) > 1 else "/Users/howell/Downloads/分割测试"
 
 
 def iou(a, b):
@@ -60,7 +61,7 @@ def main():
         manual = p.get("manualRegions") or []
         if not manual:
             continue
-        stem = key.replace("/", "__").replace(" ", "_").rsplit(".", 1)[0]
+        stem = f"{os.path.basename(os.path.normpath(SRC))}__{key}".replace("/", "__").replace(" ", "_").rsplit(".", 1)[0]
         img = np.asarray(Image.open(f"{ROOT}/data/images/{stem}.png").convert("L"), np.float32)/255
         H, W = img.shape
         ip = np.pad(img, ((0, (-H) % 32), (0, (-W) % 32)))

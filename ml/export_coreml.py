@@ -15,7 +15,8 @@ import coremltools as ct
 
 from train import UNet  # reuse the exact architecture
 
-ROOT = "/Users/howell/work/ImgSlicer-claude/ml"
+import os
+ROOT = os.path.dirname(os.path.abspath(__file__))
 # A wide contact-sheet shape (multiple of 32). Core ML can take a flexible
 # enum of shapes; a single representative size keeps the first cut simple.
 H, W = 288, 1024

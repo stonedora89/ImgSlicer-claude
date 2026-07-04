@@ -16,7 +16,7 @@ from PIL import Image
 import torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-ROOT = "/Users/howell/work/ImgSlicer-claude/ml"
+ROOT = os.environ.get("IMGSLICER_ML_ROOT", os.path.dirname(os.path.abspath(__file__)))
 DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 PATCH = 256
 
